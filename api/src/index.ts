@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import type { Env } from "./types";
+import { corsMiddleware } from "./middleware/cors";
+import { securityHeaders } from "./middleware/security";
+import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { congress } from "./apis/congress";
 import { openfec } from "./apis/openfec";
 import { weather } from "./apis/weather";
@@ -9,26 +12,10 @@ import { lunar } from "./apis/lunar";
 
 const app = new Hono<Env>();
 
-// ── CORS middleware ──────────────────────────────────────────────────────────
-app.use("/api/*", async (c, next) => {
-  const method = c.req.method;
-
-  if (method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Max-Age": "86400",
-      },
-    });
-  }
-
-  await next();
-
-  c.header("Access-Control-Allow-Origin", "*");
-});
+// ── Global middleware ────────────────────────────────────────────────────────
+app.use("/api/*", securityHeaders);
+app.use("/api/*", corsMiddleware);
+app.use("/api/*", rateLimitMiddleware);
 
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get("/api/health", (c) => {
@@ -36,6 +23,7 @@ app.get("/api/health", (c) => {
     status: "ok",
     service: "congress-vibe-check-api",
     timestamp: new Date().toISOString(),
+    environment: c.env.ENVIRONMENT ?? "unknown",
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,
