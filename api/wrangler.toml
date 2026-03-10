@@ -1,0 +1,24 @@
+name = "vibe-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# ── Worker Routes ─────────────────────────────────────────────────────────────
+# Uncomment and configure when deploying:
+# [[routes]]
+# pattern = "vibe.rjpw.space/api/*"
+# zone_name = "rjpw.space"
+
+# ── Observability ─────────────────────────────────────────────────────────────
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+# ── Environment variables ─────────────────────────────────────────────────────
+# Set secrets via wrangler:
+#   wrangler secret put CONGRESS_API_KEY
+#   wrangler secret put OPENFEC_API_KEY
+[vars]
+# CONGRESS_API_KEY and OPENFEC_API_KEY set as secrets
