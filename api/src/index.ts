@@ -34,7 +34,7 @@ app.use("/api/*", async (c, next) => {
 app.get("/api/health", (c) => {
   return c.json({
     status: "ok",
-    service: "vibe-api",
+    service: "congress-vibe-check-api",
     timestamp: new Date().toISOString(),
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
