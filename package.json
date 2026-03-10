@@ -4,10 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run dev:ui & npm run dev:api & wait",
+    "dev:ui": "vite",
+    "dev:api": "cd api && npx wrangler dev",
     "build": "tsc && vite build",
+    "build:api": "cd api && tsc --noEmit",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && cd api && tsc --noEmit",
+    "deploy:api": "cd api && npx wrangler deploy --env production",
+    "deploy:api:staging": "cd api && npx wrangler deploy --env staging"
   },
   "dependencies": {
     "react": "^18.2.0",

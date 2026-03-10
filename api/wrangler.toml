@@ -2,12 +2,6 @@ name = "congress-vibe-check-api"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# ── Worker Routes ─────────────────────────────────────────────────────────────
-# Uncomment and configure when deploying:
-# [[routes]]
-# pattern = "vibe.rjpw.space/api/*"
-# zone_name = "rjpw.space"
-
 # ── Observability ─────────────────────────────────────────────────────────────
 [observability]
 enabled = true
@@ -16,9 +10,30 @@ enabled = true
 enabled = true
 invocation_logs = true
 
-# ── Environment variables ─────────────────────────────────────────────────────
-# Set secrets via wrangler:
-#   wrangler secret put CONGRESS_API_KEY
-#   wrangler secret put OPENFEC_API_KEY
+# ── Development defaults ──────────────────────────────────────────────────────
 [vars]
-# CONGRESS_API_KEY and OPENFEC_API_KEY set as secrets
+ENVIRONMENT = "development"
+ALLOWED_ORIGINS = "http://localhost:5175,http://localhost:5173"
+# CONGRESS_API_KEY and OPENFEC_API_KEY → set via `wrangler secret put` or .dev.vars
+
+# ── Production environment ────────────────────────────────────────────────────
+[env.production]
+name = "congress-vibe-check-api"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "https://vibe.rjpw.space"
+# Secrets set via: wrangler secret put CONGRESS_API_KEY --env production
+
+# Uncomment when domain is configured:
+# [[env.production.routes]]
+# pattern = "vibe.rjpw.space/api/*"
+# zone_name = "rjpw.space"
+
+# ── Staging environment ──────────────────────────────────────────────────────
+[env.staging]
+name = "congress-vibe-check-api-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+ALLOWED_ORIGINS = "https://staging.vibe.rjpw.space"
