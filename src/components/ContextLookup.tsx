@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useApi } from "../hooks/useApi";
+import { JsonViewer } from "./JsonViewer";
 
 interface WeatherDay {
   temperature_2m_max?: number[];
@@ -31,6 +32,21 @@ interface ContextResponse {
     emoji?: string;
     days_into_cycle?: number;
   } | null;
+  // Some API versions return these at the top level
+  temperature_max?: number;
+  temperature_min?: number;
+  weathercode?: number;
+  precipitation?: number;
+  windspeed?: number;
+  sunrise_time?: string;
+  sunset_time?: string;
+  day_length?: number;
+  lunar_phase?: string;
+  lunar_illumination?: number;
+  lunar_emoji?: string;
+  earthquake_count?: number;
+  earthquake_max_magnitude?: number;
+  earthquake_largest_location?: string;
 }
 
 const WEATHER_CODES: Record<number, string> = {
@@ -66,6 +82,36 @@ export function ContextLookup() {
   const handleLookup = () => {
     context.fetchData(`/api/context/${date}`);
   };
+
+  // Normalise data: support both nested and flat API response shapes
+  const d = context.data;
+  const lunarData = d?.lunar ?? (d?.lunar_phase ? {
+    phase: d.lunar_phase,
+    illumination: d.lunar_illumination,
+    emoji: d.lunar_emoji,
+  } : null);
+
+  const weatherData = d?.weather?.daily ?? (d?.temperature_max != null ? {
+    temperature_2m_max: [d.temperature_max],
+    temperature_2m_min: d.temperature_min != null ? [d.temperature_min] : undefined,
+    weathercode: d.weathercode != null ? [d.weathercode] : undefined,
+    precipitation_sum: d.precipitation != null ? [d.precipitation] : undefined,
+    windspeed_10m_max: d.windspeed != null ? [d.windspeed] : undefined,
+  } as WeatherDay : null);
+
+  const sunriseData = d?.sunrise ?? (d?.sunrise_time ? {
+    sunrise: d.sunrise_time,
+    sunset: d.sunset_time,
+    day_length_hours: d.day_length,
+  } : null);
+
+  const earthquakeData = d?.earthquakes ?? (d?.earthquake_count != null ? {
+    count: d.earthquake_count,
+    max_magnitude: d.earthquake_max_magnitude,
+    largest_location: d.earthquake_largest_location,
+  } : null);
+
+  const hasAnyData = lunarData || weatherData || sunriseData || earthquakeData;
 
   return (
     <div className="space-y-4">
@@ -118,124 +164,147 @@ export function ContextLookup() {
             <p className="text-sm text-vibe-dim mt-1">Washington, DC</p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Lunar */}
-            {context.data.lunar && (
-              <div className="card">
-                <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
-                  Lunar Phase
-                </p>
-                <div className="flex items-center gap-3">
-                  <span className="text-4xl">{context.data.lunar.emoji}</span>
+          {hasAnyData ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Lunar */}
+              {lunarData && (
+                <div className="card">
+                  <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
+                    Lunar Phase
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <span className="text-4xl">{lunarData.emoji ?? "🌙"}</span>
+                    <div>
+                      <p className="text-lg font-bold">
+                        {lunarData.phase ?? "Unknown"}
+                      </p>
+                      {lunarData.illumination != null && (
+                        <p className="text-xs text-vibe-dim">
+                          {Math.round((lunarData.illumination ?? 0) * 100)}%
+                          illuminated
+                        </p>
+                      )}
+                      {(context.data.lunar?.days_into_cycle) != null && (
+                        <p className="text-xs text-vibe-dim">
+                          Day {context.data.lunar?.days_into_cycle} of cycle
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Weather */}
+              {weatherData && (
+                <div className="card">
+                  <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
+                    Weather
+                  </p>
                   <div>
                     <p className="text-lg font-bold">
-                      {context.data.lunar.phase}
+                      {weatherData.temperature_2m_max?.[0] != null
+                        ? `${weatherData.temperature_2m_max[0]}°C`
+                        : "N/A"}
+                      {weatherData.temperature_2m_min?.[0] != null
+                        ? ` / ${weatherData.temperature_2m_min[0]}°C`
+                        : ""}
                     </p>
                     <p className="text-xs text-vibe-dim">
-                      {Math.round((context.data.lunar.illumination ?? 0) * 100)}%
-                      illuminated
+                      {WEATHER_CODES[
+                        weatherData.weathercode?.[0] ?? -1
+                      ] ?? "Unknown conditions"}
                     </p>
                     <p className="text-xs text-vibe-dim">
-                      Day {context.data.lunar.days_into_cycle} of cycle
+                      Precipitation:{" "}
+                      {weatherData.precipitation_sum?.[0] ?? 0}mm
+                      {weatherData.windspeed_10m_max?.[0] != null
+                        ? ` | Wind: ${weatherData.windspeed_10m_max[0]} km/h`
+                        : ""}
                     </p>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* Weather */}
-            {context.data.weather?.daily && (
-              <div className="card">
-                <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
-                  Weather
-                </p>
-                <div>
-                  <p className="text-lg font-bold">
-                    {context.data.weather.daily.temperature_2m_max?.[0] != null
-                      ? `${context.data.weather.daily.temperature_2m_max[0]}°C`
-                      : "N/A"}
-                    {context.data.weather.daily.temperature_2m_min?.[0] != null
-                      ? ` / ${context.data.weather.daily.temperature_2m_min[0]}°C`
-                      : ""}
+              {/* Earthquakes */}
+              {earthquakeData && (
+                <div className="card">
+                  <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
+                    Seismic Activity
                   </p>
-                  <p className="text-xs text-vibe-dim">
-                    {WEATHER_CODES[
-                      context.data.weather.daily.weathercode?.[0] ?? -1
-                    ] ?? "Unknown"}
-                  </p>
-                  <p className="text-xs text-vibe-dim">
-                    Precipitation:{" "}
-                    {context.data.weather.daily.precipitation_sum?.[0] ?? 0}mm
-                    {context.data.weather.daily.windspeed_10m_max?.[0] != null
-                      ? ` | Wind: ${context.data.weather.daily.windspeed_10m_max[0]} km/h`
-                      : ""}
-                  </p>
+                  <div>
+                    <p className="text-lg font-bold">
+                      {earthquakeData.count ?? 0} quakes
+                    </p>
+                    <p className="text-xs text-vibe-dim">
+                      Magnitude 2.5+ worldwide
+                    </p>
+                    {(earthquakeData.max_magnitude ?? 0) > 0 && (
+                      <>
+                        <p className="text-xs text-vibe-cosmic mt-1">
+                          Largest: {earthquakeData.max_magnitude}
+                        </p>
+                        <p className="text-xs text-vibe-dim">
+                          {earthquakeData.largest_location}
+                        </p>
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* Earthquakes */}
-            {context.data.earthquakes && (
-              <div className="card">
-                <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
-                  Seismic Activity
-                </p>
-                <div>
-                  <p className="text-lg font-bold">
-                    {context.data.earthquakes.count ?? 0} quakes
+              {/* Daylight */}
+              {sunriseData && (
+                <div className="card">
+                  <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
+                    Daylight
                   </p>
-                  <p className="text-xs text-vibe-dim">
-                    Magnitude 2.5+ worldwide
-                  </p>
-                  {(context.data.earthquakes.max_magnitude ?? 0) > 0 && (
-                    <>
-                      <p className="text-xs text-vibe-cosmic mt-1">
-                        Largest: {context.data.earthquakes.max_magnitude}
-                      </p>
-                      <p className="text-xs text-vibe-dim">
-                        {context.data.earthquakes.largest_location}
-                      </p>
-                    </>
-                  )}
+                  <div>
+                    <p className="text-lg font-bold">
+                      {sunriseData.day_length_hours ?? "?"}h of light
+                    </p>
+                    <p className="text-xs text-vibe-dim">
+                      Sunrise:{" "}
+                      {sunriseData.sunrise
+                        ? new Date(sunriseData.sunrise).toLocaleTimeString()
+                        : "?"}
+                    </p>
+                    <p className="text-xs text-vibe-dim">
+                      Sunset:{" "}
+                      {sunriseData.sunset
+                        ? new Date(sunriseData.sunset).toLocaleTimeString()
+                        : "?"}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Daylight */}
-            {context.data.sunrise && (
-              <div className="card">
-                <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
-                  Daylight
-                </p>
-                <div>
-                  <p className="text-lg font-bold">
-                    {context.data.sunrise.day_length_hours ?? "?"}h of light
-                  </p>
-                  <p className="text-xs text-vibe-dim">
-                    Sunrise:{" "}
-                    {context.data.sunrise.sunrise
-                      ? new Date(context.data.sunrise.sunrise).toLocaleTimeString()
-                      : "?"}
-                  </p>
-                  <p className="text-xs text-vibe-dim">
-                    Sunset:{" "}
-                    {context.data.sunrise.sunset
-                      ? new Date(context.data.sunrise.sunset).toLocaleTimeString()
-                      : "?"}
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          ) : (
+            /* No sub-data returned — show raw response for debugging */
+            <div className="card border-yellow-500/30">
+              <p className="text-sm text-yellow-400 mb-2">
+                The API returned a date but no environmental data (weather, lunar, earthquakes, or daylight).
+              </p>
+              <p className="text-xs text-vibe-dim mb-3">
+                This may be a temporary issue with the upstream data providers (Open-Meteo, USGS, or sunrise API).
+                Try a different date, or check the raw response below for details.
+              </p>
+              <JsonViewer data={context.data} label="Raw API Response" />
+            </div>
+          )}
 
           {/* Disclaimer */}
-          <div className="card bg-vibe-bg border-dashed">
-            <p className="text-xs text-vibe-dim text-center italic">
-              These conditions were present in the Washington, DC area on this date.
-              Any correlation to congressional activity is almost certainly
-              meaningless. We're monitoring the situation.
-            </p>
-          </div>
+          {hasAnyData && (
+            <>
+              <div className="card bg-vibe-bg border-dashed">
+                <p className="text-xs text-vibe-dim text-center italic">
+                  These conditions were present in the Washington, DC area on this date.
+                  Any correlation to congressional activity is almost certainly
+                  meaningless. We're monitoring the situation.
+                </p>
+              </div>
+              <JsonViewer data={context.data} label="Raw API Response" />
+            </>
+          )}
         </>
       )}
     </div>
