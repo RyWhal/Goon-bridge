@@ -31,7 +31,7 @@ interface BillDetailResponse {
 }
 
 export function BillSearch() {
-  const [congress, setCongress] = useState("118");
+  const [congress, setCongress] = useState("119");
   const [billType, setBillType] = useState("");
   const [limit, setLimit] = useState("20");
   const list = useApi<BillListResponse>();
@@ -66,6 +66,7 @@ export function BillSearch() {
             value={congress}
             onChange={(e) => setCongress(e.target.value)}
           >
+            <option value="119">119th Congress</option>
             <option value="118">118th Congress</option>
             <option value="117">117th Congress</option>
             <option value="116">116th Congress</option>
