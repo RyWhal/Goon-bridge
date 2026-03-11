@@ -11,12 +11,13 @@ enabled = true
 invocation_logs = true
 
 # ── Variables ─────────────────────────────────────────────────────────────────
-# Production vars — secrets (CONGRESS_API_KEY, OPENFEC_API_KEY, SUPABASE_URL,
-# SUPABASE_SERVICE_KEY) are set in the Cloudflare dashboard under
+# Secrets (CONGRESS_API_KEY, OPENFEC_API_KEY, SUPABASE_SERVICE_KEY) are set
+# as encrypted secrets in the Cloudflare dashboard under
 # Workers → vibe-api → Settings → Variables and Secrets.
 [vars]
 ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space,http://localhost:5175,http://localhost:5173"
+SUPABASE_URL = "https://iqedxqqiinfokrbcaqsk.supabase.co"
 
 # Uncomment when custom domain is configured in Cloudflare DNS:
 # [[routes]]
