@@ -1,9 +1,14 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
+import { getSupabase } from "../lib/supabase";
 
 const openfec = new Hono<Env>();
 
 const BASE = "https://api.open.fec.gov/v1";
+
+function hasSupabase(env: Env["Bindings"]): boolean {
+  return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
+}
 
 async function fecFetch(
   path: string,
@@ -49,7 +54,38 @@ openfec.get("/candidates", async (c) => {
     if (!resp.ok) {
       return c.json({ error: `FEC API: ${resp.status}` }, 502);
     }
-    const data: unknown = await resp.json();
+    const data = (await resp.json()) as {
+      results?: Array<{
+        candidate_id?: string;
+        name?: string;
+        party_full?: string;
+        party?: string;
+        state?: string;
+        office_full?: string;
+        office?: string;
+        election_years?: number[];
+        [key: string]: unknown;
+      }>;
+    };
+
+    // Cache candidates to Supabase in the background
+    if (hasSupabase(c.env) && data.results?.length) {
+      const sb = getSupabase(c.env);
+      const rows = data.results
+        .filter((r) => r.candidate_id)
+        .map((r) => ({
+          candidate_id: r.candidate_id!,
+          name: r.name ?? null,
+          party: r.party_full ?? r.party ?? null,
+          state: r.state ?? null,
+          office: r.office ?? r.office_full?.charAt(0) ?? null,
+          election_years: r.election_years ?? null,
+        }));
+      c.executionCtx.waitUntil(
+        Promise.resolve(sb.from("fec_candidates").upsert(rows, { onConflict: "candidate_id" }))
+      );
+    }
+
     return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
   } catch {
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
@@ -120,7 +156,44 @@ openfec.get("/contributions", async (c) => {
     if (!resp.ok) {
       return c.json({ error: `FEC API: ${resp.status}` }, 502);
     }
-    const data: unknown = await resp.json();
+    const data = (await resp.json()) as {
+      results?: Array<{
+        candidate_id?: string;
+        committee_id?: string;
+        committee?: { name?: string };
+        contributor_name?: string;
+        contributor_employer?: string;
+        contributor_occupation?: string;
+        contributor_state?: string;
+        contribution_receipt_amount?: number;
+        contribution_receipt_date?: string;
+        two_year_transaction_period?: number;
+        [key: string]: unknown;
+      }>;
+    };
+
+    // Cache contributions to Supabase in the background
+    if (hasSupabase(c.env) && data.results?.length) {
+      const sb = getSupabase(c.env);
+      const rows = data.results
+        .filter((r) => r.candidate_id || r.committee_id)
+        .map((r) => ({
+          candidate_id: r.candidate_id ?? null,
+          committee_id: r.committee_id ?? null,
+          committee_name: r.committee?.name ?? null,
+          contributor_name: r.contributor_name ?? null,
+          contributor_employer: r.contributor_employer ?? null,
+          contributor_occupation: r.contributor_occupation ?? null,
+          contributor_state: r.contributor_state ?? null,
+          contribution_amount: r.contribution_receipt_amount ?? null,
+          contribution_date: r.contribution_receipt_date ?? null,
+          two_year_period: r.two_year_transaction_period ?? null,
+        }));
+      c.executionCtx.waitUntil(
+        Promise.resolve(sb.from("contributions").insert(rows))
+      );
+    }
+
     return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
   } catch {
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
@@ -185,6 +258,197 @@ openfec.get("/independent-expenditures", async (c) => {
   } catch {
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
   }
+});
+
+// ── GET /api/fec/link/:bioguideId ─────────────────────────────────────────────
+// Find FEC candidates matching a Congress member and link them in Supabase
+openfec.get("/link/:bioguideId", async (c) => {
+  const apiKey = c.env.OPENFEC_API_KEY;
+  if (!apiKey) return c.json({ error: "OpenFEC API key not configured" }, 500);
+  if (!hasSupabase(c.env)) return c.json({ error: "Supabase not configured" }, 503);
+
+  const bioguideId = c.req.param("bioguideId");
+  const sb = getSupabase(c.env);
+
+  // Check if already linked
+  const { data: existing } = await sb
+    .from("fec_candidates")
+    .select("*")
+    .eq("bioguide_id", bioguideId);
+
+  if (existing && existing.length > 0) {
+    return c.json({ bioguide_id: bioguideId, fec_candidates: existing, source: "cache" });
+  }
+
+  // Look up the member to get name/state for FEC search
+  const { data: member } = await sb
+    .from("members")
+    .select("name, state, district")
+    .eq("bioguide_id", bioguideId)
+    .single();
+
+  if (!member) {
+    return c.json({ error: "Member not found in database" }, 404);
+  }
+
+  // Search FEC by name + state
+  const searchParams: Record<string, string> = {
+    q: member.name,
+    per_page: "5",
+  };
+  if (member.state) searchParams["state"] = member.state;
+  // If they have a district, they're in the House
+  if (member.district != null) {
+    searchParams["office"] = "H";
+  }
+
+  try {
+    const resp = await fecFetch("/candidates/search/", apiKey, searchParams);
+    if (!resp.ok) {
+      return c.json({ error: `FEC API: ${resp.status}` }, 502);
+    }
+    const data = (await resp.json()) as {
+      results?: Array<{
+        candidate_id?: string;
+        name?: string;
+        party_full?: string;
+        party?: string;
+        state?: string;
+        office?: string;
+        election_years?: number[];
+      }>;
+    };
+
+    const candidates = (data.results ?? []).filter((r) => r.candidate_id);
+
+    // Link all matching candidates to this bioguide_id
+    if (candidates.length > 0) {
+      const rows = candidates.map((r) => ({
+        candidate_id: r.candidate_id!,
+        bioguide_id: bioguideId,
+        name: r.name ?? null,
+        party: r.party_full ?? r.party ?? null,
+        state: r.state ?? null,
+        office: r.office ?? null,
+        election_years: r.election_years ?? null,
+      }));
+      await sb.from("fec_candidates").upsert(rows, { onConflict: "candidate_id" });
+    }
+
+    return c.json({
+      bioguide_id: bioguideId,
+      fec_candidates: candidates,
+      source: "fec_api",
+      count: candidates.length,
+    });
+  } catch {
+    return c.json({ error: "Failed to search FEC API" }, 502);
+  }
+});
+
+// ── GET /api/fec/member/:bioguideId/contributions ────────────────────────────
+// Fetch and cache contributions for a Congress member (via their FEC candidate IDs)
+openfec.get("/member/:bioguideId/contributions", async (c) => {
+  const apiKey = c.env.OPENFEC_API_KEY;
+  if (!apiKey) return c.json({ error: "OpenFEC API key not configured" }, 500);
+  if (!hasSupabase(c.env)) return c.json({ error: "Supabase not configured" }, 503);
+
+  const bioguideId = c.req.param("bioguideId");
+  const sb = getSupabase(c.env);
+
+  // Get FEC candidate IDs for this member
+  const { data: fecCandidates } = await sb
+    .from("fec_candidates")
+    .select("candidate_id")
+    .eq("bioguide_id", bioguideId);
+
+  if (!fecCandidates || fecCandidates.length === 0) {
+    return c.json({
+      error: "No FEC candidates linked. Call /api/fec/link/:bioguideId first.",
+    }, 404);
+  }
+
+  const candidateIds = fecCandidates.map((r) => r.candidate_id);
+
+  // Check Supabase cache first
+  const { data: cached } = await sb
+    .from("contributions")
+    .select("*")
+    .in("candidate_id", candidateIds)
+    .order("contribution_amount", { ascending: false })
+    .limit(100);
+
+  if (cached && cached.length > 0) {
+    return c.json({
+      bioguide_id: bioguideId,
+      contributions: cached,
+      count: cached.length,
+      source: "cache",
+    }, 200, { "Cache-Control": "public, max-age=1800" });
+  }
+
+  // Fetch from FEC API for each candidate
+  const allContributions: Array<Record<string, unknown>> = [];
+
+  for (const candidateId of candidateIds.slice(0, 3)) {
+    try {
+      const resp = await fecFetch("/schedules/schedule_a/", apiKey, {
+        candidate_id: candidateId,
+        per_page: "50",
+        sort: "-contribution_receipt_amount",
+        is_individual: "true",
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          results?: Array<{
+            candidate_id?: string;
+            committee_id?: string;
+            committee?: { name?: string };
+            contributor_name?: string;
+            contributor_employer?: string;
+            contributor_occupation?: string;
+            contributor_state?: string;
+            contribution_receipt_amount?: number;
+            contribution_receipt_date?: string;
+            two_year_transaction_period?: number;
+          }>;
+        };
+        if (data.results) {
+          allContributions.push(...data.results);
+        }
+      }
+    } catch {
+      // Skip failed fetches for individual candidates
+    }
+  }
+
+  // Cache to Supabase
+  if (allContributions.length > 0) {
+    const rows = allContributions
+      .filter((r) => r.candidate_id || r.committee_id)
+      .map((r) => ({
+        candidate_id: (r.candidate_id as string) ?? null,
+        committee_id: (r.committee_id as string) ?? null,
+        committee_name: (r.committee as { name?: string })?.name ?? null,
+        contributor_name: (r.contributor_name as string) ?? null,
+        contributor_employer: (r.contributor_employer as string) ?? null,
+        contributor_occupation: (r.contributor_occupation as string) ?? null,
+        contributor_state: (r.contributor_state as string) ?? null,
+        contribution_amount: (r.contribution_receipt_amount as number) ?? null,
+        contribution_date: (r.contribution_receipt_date as string) ?? null,
+        two_year_period: (r.two_year_transaction_period as number) ?? null,
+      }));
+    c.executionCtx.waitUntil(
+      Promise.resolve(sb.from("contributions").insert(rows))
+    );
+  }
+
+  return c.json({
+    bioguide_id: bioguideId,
+    contributions: allContributions,
+    count: allContributions.length,
+    source: "fec_api",
+  }, 200, { "Cache-Control": "public, max-age=1800" });
 });
 
 export { openfec };

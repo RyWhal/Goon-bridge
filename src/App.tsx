@@ -4,6 +4,7 @@ import { MemberSearch } from "./components/MemberSearch";
 import { VoteSearch } from "./components/VoteSearch";
 import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
+import { FollowTheMoney } from "./components/FollowTheMoney";
 import { ContextLookup } from "./components/ContextLookup";
 
 const TABS = [
@@ -11,6 +12,7 @@ const TABS = [
   { id: "votes", label: "Votes" },
   { id: "bills", label: "Bills" },
   { id: "money", label: "Money" },
+  { id: "follow", label: "Follow the Money" },
   { id: "context", label: "Cosmic Context" },
 ] as const;
 
@@ -66,6 +68,7 @@ export default function App() {
         {activeTab === "votes" && <VoteSearch />}
         {activeTab === "bills" && <BillSearch />}
         {activeTab === "money" && <FecSearch />}
+        {activeTab === "follow" && <FollowTheMoney />}
         {activeTab === "context" && <ContextLookup />}
       </main>
 

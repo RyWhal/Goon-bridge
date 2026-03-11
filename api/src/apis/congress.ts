@@ -251,9 +251,41 @@ congress.get("/votes", async (c) => {
 
   const congress_num = c.req.query("congress") ?? "119";
   const chamber = c.req.query("chamber");
+  const limit = parseInt(c.req.query("limit") ?? "20", 10);
+  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+
+  // Try Supabase first
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      let query = sb
+        .from("votes")
+        .select("*", { count: "exact" })
+        .eq("congress", parseInt(congress_num, 10))
+        .order("date", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (chamber) {
+        query = query.eq("chamber", chamber.toLowerCase());
+      }
+
+      const { data, count, error } = await query;
+
+      if (!error && data && data.length > 0) {
+        return c.json(
+          { votes: data, count: count ?? data.length },
+          200,
+          { "Cache-Control": "public, max-age=1800" }
+        );
+      }
+    } catch {
+      // Fall through to live API
+    }
+  }
+
   const params: Record<string, string> = {
-    limit: c.req.query("limit") ?? "20",
-    offset: c.req.query("offset") ?? "0",
+    limit: limit.toString(),
+    offset: offset.toString(),
   };
 
   let path = `/vote`;
@@ -269,7 +301,50 @@ congress.get("/votes", async (c) => {
     if (!resp.ok) {
       return c.json({ error: `Congress API: ${resp.status}` }, 502);
     }
-    const data: unknown = await resp.json();
+    const data = (await resp.json()) as {
+      votes?: Array<{
+        congress?: number;
+        chamber?: string;
+        number?: number;
+        date?: string;
+        question?: string;
+        description?: string;
+        result?: string;
+        totalYea?: number;
+        totalNay?: number;
+        totalNotVoting?: number;
+        bill?: { congress?: number; type?: string; number?: number };
+        [key: string]: unknown;
+      }>;
+    };
+
+    // Cache votes to Supabase in the background
+    if (hasSupabase(c.env) && data.votes?.length) {
+      const sb = getSupabase(c.env);
+      const rows = data.votes
+        .filter((v) => v.congress && v.chamber && v.number)
+        .map((v) => ({
+          congress: v.congress!,
+          chamber: (v.chamber ?? "").toLowerCase(),
+          roll_call_number: v.number!,
+          date: v.date ?? null,
+          question: v.question ?? null,
+          description: v.description ?? null,
+          result: v.result ?? null,
+          total_yea: v.totalYea ?? null,
+          total_nay: v.totalNay ?? null,
+          total_not_voting: v.totalNotVoting ?? null,
+          bill_congress: v.bill?.congress ?? null,
+          bill_type: v.bill?.type ?? null,
+          bill_number: v.bill?.number ?? null,
+        }));
+      c.executionCtx.waitUntil(
+        Promise.resolve(
+          sb.from("votes").upsert(rows, { onConflict: "congress,chamber,roll_call_number" })
+        )
+      );
+    }
+
     return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
@@ -303,9 +378,41 @@ congress.get("/bills", async (c) => {
 
   const congress_num = c.req.query("congress") ?? "119";
   const billType = c.req.query("type");
+  const limit = parseInt(c.req.query("limit") ?? "20", 10);
+  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+
+  // Try Supabase first
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      let query = sb
+        .from("bills")
+        .select("*", { count: "exact" })
+        .eq("congress", parseInt(congress_num, 10))
+        .order("latest_action_date", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (billType) {
+        query = query.eq("bill_type", billType.toLowerCase());
+      }
+
+      const { data, count, error } = await query;
+
+      if (!error && data && data.length > 0) {
+        return c.json(
+          { bills: data, count: count ?? data.length },
+          200,
+          { "Cache-Control": "public, max-age=1800" }
+        );
+      }
+    } catch {
+      // Fall through to live API
+    }
+  }
+
   const params: Record<string, string> = {
-    limit: c.req.query("limit") ?? "20",
-    offset: c.req.query("offset") ?? "0",
+    limit: limit.toString(),
+    offset: offset.toString(),
   };
 
   const sort = c.req.query("sort");
@@ -319,7 +426,39 @@ congress.get("/bills", async (c) => {
     if (!resp.ok) {
       return c.json({ error: `Congress API: ${resp.status}` }, 502);
     }
-    const data: unknown = await resp.json();
+    const data = (await resp.json()) as {
+      bills?: Array<{
+        congress?: number;
+        type?: string;
+        number?: number;
+        title?: string;
+        policyArea?: { name?: string };
+        latestAction?: { text?: string; actionDate?: string };
+        [key: string]: unknown;
+      }>;
+    };
+
+    // Cache bills to Supabase in the background
+    if (hasSupabase(c.env) && data.bills?.length) {
+      const sb = getSupabase(c.env);
+      const rows = data.bills
+        .filter((b) => b.congress && b.type && b.number)
+        .map((b) => ({
+          congress: b.congress!,
+          bill_type: (b.type ?? "").toLowerCase(),
+          bill_number: b.number!,
+          title: b.title ?? null,
+          policy_area: b.policyArea?.name ?? null,
+          latest_action_text: b.latestAction?.text ?? null,
+          latest_action_date: b.latestAction?.actionDate ?? null,
+        }));
+      c.executionCtx.waitUntil(
+        Promise.resolve(
+          sb.from("bills").upsert(rows, { onConflict: "congress,bill_type,bill_number" })
+        )
+      );
+    }
+
     return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
