@@ -1,2 +1,2 @@
-/api/*  https://congress-vibe-check-api.rjpw.workers.dev/api/:splat  200
+/api/*  https://vibe-api.ryanjpwhalen.workers.dev/api/:splat  200
 /*  /index.html  200
