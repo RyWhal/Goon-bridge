@@ -25,7 +25,7 @@ ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space"
 # Secrets set via: wrangler secret put CONGRESS_API_KEY --env production
 
-# Uncomment when domain is configured:
+# Uncomment when custom domain is configured in Cloudflare DNS:
 # [[env.production.routes]]
 # pattern = "congressional-vibes.rjpw.space/api/*"
 # zone_name = "rjpw.space"
