@@ -14,6 +14,20 @@ import { getSupabase } from "./lib/supabase";
 
 const app = new Hono<Env>();
 
+// ── Global error handler ────────────────────────────────────────────────────
+// Catches any unhandled exception so every response is JSON, never an HTML
+// error page that the frontend can't parse.
+app.onError((err, c) => {
+  console.error("Unhandled error:", err);
+  return c.json(
+    {
+      error: "Internal server error",
+      detail: err instanceof Error ? err.message : String(err),
+    },
+    500
+  );
+});
+
 // ── Global middleware ────────────────────────────────────────────────────────
 app.use("/api/*", securityHeaders);
 app.use("/api/*", corsMiddleware);
