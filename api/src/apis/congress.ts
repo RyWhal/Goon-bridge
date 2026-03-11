@@ -100,13 +100,13 @@ congress.get("/members", async (c) => {
 
       if (!error && data && data.length > 0) {
         // If cache rows don't have party info, fall through to live API so we can rehydrate.
-        const hasPartyCoverage = data.some((m) => !!m.party);
+        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
         if (hasPartyCoverage) {
           // Map Supabase rows to the same shape the frontend expects
           const members = data.map((m) => ({
             bioguideId: m.bioguide_id,
             name: m.name,
-            party: m.party,
+            party: normalizePartyValue(m.party) ?? m.party,
             state: m.state,
             district: m.district,
             depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
@@ -209,12 +209,12 @@ congress.get("/members/search", async (c) => {
         .limit(50);
 
       if (!error && data && data.length > 0) {
-        const hasPartyCoverage = data.some((m) => !!m.party);
+        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
         if (hasPartyCoverage) {
           const members = data.map((m) => ({
             bioguideId: m.bioguide_id,
             name: m.name,
-            party: m.party,
+            party: normalizePartyValue(m.party) ?? m.party,
             state: m.state,
             district: m.district,
             depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
