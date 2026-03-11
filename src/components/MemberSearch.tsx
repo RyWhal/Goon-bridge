@@ -36,7 +36,7 @@ interface MemberDetailResponse {
 
 export function MemberSearch() {
   const [query, setQuery] = useState("");
-  const [congress, setCongress] = useState("118");
+  const [congress, setCongress] = useState("119");
   const search = useApi<MemberSearchResponse>();
   const detail = useApi<MemberDetailResponse>();
 
@@ -74,6 +74,7 @@ export function MemberSearch() {
             value={congress}
             onChange={(e) => setCongress(e.target.value)}
           >
+            <option value="119">119th Congress (2025-2027)</option>
             <option value="118">118th Congress (2023-2025)</option>
             <option value="117">117th Congress (2021-2023)</option>
             <option value="116">116th Congress (2019-2021)</option>

@@ -34,7 +34,7 @@ congress.get("/members", async (c) => {
   params["offset"] = offset;
 
   // Congress.gov member list endpoint
-  const currentCongress = c.req.query("congress") ?? "118";
+  const currentCongress = c.req.query("congress") ?? "119";
   const path = `/member/congress/${currentCongress}`;
 
   try {
@@ -66,7 +66,7 @@ congress.get("/members/search", async (c) => {
   // Congress.gov doesn't have a direct name search — we fetch the full member
   // list for the congress and filter client-side. For a production app, we'd
   // ingest into Supabase and search there.
-  const currentCongress = c.req.query("congress") ?? "118";
+  const currentCongress = c.req.query("congress") ?? "119";
   const path = `/member/congress/${currentCongress}`;
   params["limit"] = "250";
   params["offset"] = "0";
@@ -121,7 +121,7 @@ congress.get("/votes", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
 
-  const congress_num = c.req.query("congress") ?? "118";
+  const congress_num = c.req.query("congress") ?? "119";
   const chamber = c.req.query("chamber"); // house or senate
   const params: Record<string, string> = {
     limit: c.req.query("limit") ?? "20",
@@ -173,7 +173,7 @@ congress.get("/bills", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
 
-  const congress_num = c.req.query("congress") ?? "118";
+  const congress_num = c.req.query("congress") ?? "119";
   const billType = c.req.query("type"); // hr, s, hjres, sjres, etc.
   const params: Record<string, string> = {
     limit: c.req.query("limit") ?? "20",
