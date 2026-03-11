@@ -15,6 +15,7 @@ interface VoteItem {
 
 interface VoteListResponse {
   votes?: VoteItem[];
+  notice?: string;
 }
 
 interface VoteDetailResponse {
@@ -66,17 +67,14 @@ export function VoteSearch() {
           >
             <option value="119">119th Congress</option>
             <option value="118">118th Congress</option>
-            <option value="117">117th Congress</option>
-            <option value="116">116th Congress</option>
           </select>
           <select
             className="select"
             value={chamber}
             onChange={(e) => setChamber(e.target.value)}
           >
-            <option value="">Both Chambers</option>
-            <option value="house">House</option>
-            <option value="senate">Senate</option>
+            <option value="">House (All Sessions)</option>
+            <option value="senate">Senate (not yet available)</option>
           </select>
           <select
             className="select"
@@ -101,7 +99,21 @@ export function VoteSearch() {
         </div>
       )}
 
-      {list.data?.votes && (
+      {list.data?.notice && (
+        <div className="card border-yellow-500/30">
+          <p className="text-sm text-yellow-400">{list.data.notice}</p>
+        </div>
+      )}
+
+      {list.data?.votes && list.data.votes.length === 0 && !list.data.notice && (
+        <div className="card">
+          <p className="text-sm text-vibe-dim">
+            No roll call votes found for this congress selection.
+          </p>
+        </div>
+      )}
+
+      {list.data?.votes && list.data.votes.length > 0 && (
         <div className="space-y-2">
           {list.data.votes.map((v, i) => (
             <button
