@@ -25,6 +25,30 @@ async function fecFetch(
   return fetch(url.toString());
 }
 
+
+async function readFecErrorDetails(resp: Response): Promise<string | null> {
+  const raw = await resp.text().catch(() => "");
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: string;
+      message?: string;
+      detail?: string;
+      [key: string]: unknown;
+    };
+
+    const reason =
+      parsed.error ?? parsed.message ?? parsed.detail ?? (typeof parsed === "object" ? JSON.stringify(parsed) : null);
+
+    if (!reason) return null;
+    return String(reason).slice(0, 300);
+  } catch {
+    const snippet = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return snippet ? snippet.slice(0, 300) : null;
+  }
+}
+
 async function resolveCandidateCommitteeId(
   apiKey: string,
   candidateId: string
@@ -190,7 +214,31 @@ openfec.get("/contributions", async (c) => {
   try {
     const resp = await fecFetch("/schedules/schedule_a/", apiKey, params);
     if (!resp.ok) {
-      return c.json({ error: `FEC API: ${resp.status}` }, 502);
+      const upstreamDetail = await readFecErrorDetails(resp);
+      const debugParams = Object.fromEntries(
+        Object.entries(params).filter(([key]) =>
+          ["candidate_id", "committee_id", "page", "per_page", "sort", "two_year_transaction_period"].includes(key)
+        )
+      );
+
+      const detail = [
+        `OpenFEC status ${resp.status}`,
+        upstreamDetail ? `upstream: ${upstreamDetail}` : null,
+        `query: ${JSON.stringify(debugParams)}`,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      return c.json(
+        {
+          error: `FEC API ${resp.status}${upstreamDetail ? `: ${upstreamDetail}` : ""}`,
+          detail,
+          upstream_status: resp.status,
+          upstream_error: upstreamDetail,
+          query: debugParams,
+        },
+        502
+      );
     }
     const data = (await resp.json()) as {
       results?: Array<{
