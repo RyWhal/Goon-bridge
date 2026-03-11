@@ -25,6 +25,35 @@ async function fecFetch(
   return fetch(url.toString());
 }
 
+async function resolveCandidateCommitteeId(
+  apiKey: string,
+  candidateId: string
+): Promise<string | null> {
+  try {
+    const candidateResp = await fecFetch(`/candidate/${candidateId}/`, apiKey);
+    if (!candidateResp.ok) return null;
+
+    const candidateData = (await candidateResp.json()) as {
+      results?: Array<{
+        principal_committees?: Array<{ committee_id?: string }>;
+        candidate_status?: string;
+        [key: string]: unknown;
+      }>;
+    };
+
+    const candidate = candidateData.results?.[0];
+    if (!candidate?.principal_committees?.length) return null;
+
+    const firstAuthorized = candidate.principal_committees.find((committee) =>
+      typeof committee.committee_id === "string" && committee.committee_id.length > 0
+    );
+
+    return firstAuthorized?.committee_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
 // Search for FEC candidates
 openfec.get("/candidates", async (c) => {
@@ -125,7 +154,14 @@ openfec.get("/contributions", async (c) => {
   };
 
   const candidateId = c.req.query("candidate_id");
-  if (candidateId) params["candidate_id"] = candidateId;
+  if (candidateId) {
+    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
+    if (committeeIdForCandidate) {
+      params["committee_id"] = committeeIdForCandidate;
+    } else {
+      params["candidate_id"] = candidateId;
+    }
+  }
 
   const committeeId = c.req.query("committee_id");
   if (committeeId) params["committee_id"] = committeeId;
