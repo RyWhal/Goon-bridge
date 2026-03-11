@@ -29,6 +29,63 @@ function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
 }
 
+
+function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+
+type CongressPartyHistoryItem = {
+  partyName?: string;
+  partyAbbreviation?: string;
+};
+
+type CongressMemberLike = {
+  party?: string;
+  partyName?: string;
+  partyHistory?: CongressPartyHistoryItem[];
+  terms?: { item?: Array<{ party?: string; partyName?: string; partyAbbreviation?: string }> };
+};
+
+function normalizePartyValue(raw?: string | null): string | null {
+  if (!raw) return null;
+  const cleaned = raw.trim();
+  if (!cleaned) return null;
+
+  if (cleaned.length === 1) {
+    const c = cleaned.toUpperCase();
+    if (c === "D" || c === "R" || c === "I") return c;
+    return cleaned;
+  }
+
+  const lower = cleaned.toLowerCase();
+  if (lower.includes("democrat")) return "D";
+  if (lower.includes("republic")) return "R";
+  if (lower.includes("independent")) return "I";
+
+  return cleaned;
+}
+
+function extractMemberParty(member: CongressMemberLike): string | null {
+  const history = Array.isArray(member.partyHistory)
+    ? member.partyHistory
+    : (member.partyHistory as unknown as { item?: CongressPartyHistoryItem[] } | undefined)?.item;
+  const currentTerm = member.terms?.item?.[0];
+
+  const candidates = [
+    normalizePartyValue(member.party),
+    normalizePartyValue(member.partyName),
+    normalizePartyValue(history?.[0]?.partyAbbreviation),
+    normalizePartyValue(history?.[0]?.partyName),
+    normalizePartyValue(currentTerm?.partyAbbreviation),
+    normalizePartyValue(currentTerm?.partyName),
+    normalizePartyValue(currentTerm?.party),
+  ];
+  return candidates.find((value): value is string => !!value) ?? null;
+}
+
 // ── GET /api/congress/members ────────────────────────────────────────────────
 // List members — tries Supabase first, falls through to Congress.gov
 congress.get("/members", async (c) => {
@@ -36,8 +93,8 @@ congress.get("/members", async (c) => {
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
 
   const currentCongress = c.req.query("congress") ?? "119";
-  const limit = parseInt(c.req.query("limit") ?? "20", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
   // Try Supabase first
   if (hasSupabase(c.env)) {
@@ -51,20 +108,24 @@ congress.get("/members", async (c) => {
         .range(offset, offset + limit - 1);
 
       if (!error && data && data.length > 0) {
-        // Map Supabase rows to the same shape the frontend expects
-        const members = data.map((m) => ({
-          bioguideId: m.bioguide_id,
-          name: m.name,
-          party: m.party,
-          state: m.state,
-          district: m.district,
-          depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
-        }));
-        return c.json(
-          { members, count: count ?? members.length },
-          200,
-          { "Cache-Control": "public, max-age=3600" }
-        );
+        // If cache rows don't have party info, fall through to live API so we can rehydrate.
+        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
+        if (hasPartyCoverage) {
+          // Map Supabase rows to the same shape the frontend expects
+          const members = data.map((m) => ({
+            bioguideId: m.bioguide_id,
+            name: m.name,
+            party: normalizePartyValue(m.party) ?? m.party,
+            state: m.state,
+            district: m.district,
+            depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
+          }));
+          return c.json(
+            { members, count: count ?? members.length },
+            200,
+            { "Cache-Control": "public, max-age=3600" }
+          );
+        }
       }
     } catch {
       // Supabase failed — fall through to live API
@@ -88,6 +149,8 @@ congress.get("/members", async (c) => {
         bioguideId?: string;
         name?: string;
         party?: string;
+        partyName?: string;
+        partyHistory?: CongressPartyHistoryItem[];
         state?: string;
         district?: number;
         depiction?: { imageUrl?: string };
@@ -95,10 +158,15 @@ congress.get("/members", async (c) => {
       }>;
     };
 
+    const normalizedMembers = (data.members ?? []).map((m) => ({
+      ...m,
+      party: extractMemberParty(m),
+    }));
+
     // Cache members to Supabase in the background
-    if (hasSupabase(c.env) && data.members?.length) {
+    if (hasSupabase(c.env) && normalizedMembers.length) {
       const sb = getSupabase(c.env);
-      const rows = data.members
+      const rows = normalizedMembers
         .filter((m) => m.bioguideId)
         .map((m) => ({
           bioguide_id: m.bioguideId!,
@@ -115,7 +183,11 @@ congress.get("/members", async (c) => {
       );
     }
 
-    return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
+    return c.json(
+      { ...data, members: normalizedMembers },
+      200,
+      { "Cache-Control": "public, max-age=3600" }
+    );
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
@@ -146,19 +218,22 @@ congress.get("/members/search", async (c) => {
         .limit(50);
 
       if (!error && data && data.length > 0) {
-        const members = data.map((m) => ({
-          bioguideId: m.bioguide_id,
-          name: m.name,
-          party: m.party,
-          state: m.state,
-          district: m.district,
-          depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
-        }));
-        return c.json(
-          { members, count: members.length },
-          200,
-          { "Cache-Control": "public, max-age=3600" }
-        );
+        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
+        if (hasPartyCoverage) {
+          const members = data.map((m) => ({
+            bioguideId: m.bioguide_id,
+            name: m.name,
+            party: normalizePartyValue(m.party) ?? m.party,
+            state: m.state,
+            district: m.district,
+            depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
+          }));
+          return c.json(
+            { members, count: members.length },
+            200,
+            { "Cache-Control": "public, max-age=3600" }
+          );
+        }
       }
     } catch {
       // Fall through to live API
@@ -182,14 +257,22 @@ congress.get("/members/search", async (c) => {
         name?: string;
         state?: string;
         party?: string;
+        partyName?: string;
+        partyHistory?: CongressPartyHistoryItem[];
         bioguideId?: string;
         district?: number;
         depiction?: { imageUrl?: string };
         [key: string]: unknown;
       }>;
     };
+
+    const normalizedMembers = (data.members ?? []).map((m) => ({
+      ...m,
+      party: extractMemberParty(m),
+    }));
+
     const qLower = query.toLowerCase();
-    const filtered = (data.members ?? []).filter((m) => {
+    const filtered = normalizedMembers.filter((m) => {
       const name = (m.name ?? "").toLowerCase();
       const state = (m.state ?? "").toLowerCase();
       const party = (m.party ?? "").toLowerCase();
@@ -197,9 +280,9 @@ congress.get("/members/search", async (c) => {
     });
 
     // Cache all fetched members to Supabase in the background
-    if (hasSupabase(c.env) && data.members?.length) {
+    if (hasSupabase(c.env) && normalizedMembers.length) {
       const sb = getSupabase(c.env);
-      const rows = data.members
+      const rows = normalizedMembers
         .filter((m) => m.bioguideId)
         .map((m) => ({
           bioguide_id: m.bioguideId!,
@@ -237,7 +320,15 @@ congress.get("/members/:bioguideId", async (c) => {
     if (!resp.ok) {
       return c.json({ error: `Congress API: ${resp.status}` }, 502);
     }
-    const data: unknown = await resp.json();
+    const data = (await resp.json()) as {
+      member?: CongressMemberLike & Record<string, unknown>;
+      [key: string]: unknown;
+    };
+
+    if (data.member) {
+      data.member.party = extractMemberParty(data.member) ?? undefined;
+    }
+
     return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
@@ -251,8 +342,8 @@ congress.get("/votes", async (c) => {
 
   const congress_num = c.req.query("congress") ?? "119";
   const chamber = c.req.query("chamber");
-  const limit = parseInt(c.req.query("limit") ?? "20", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
   // Helper to normalize vote rows from Supabase (snake_case) to frontend (camelCase)
   function normalizeDbVote(row: Record<string, unknown>) {
@@ -305,10 +396,9 @@ congress.get("/votes", async (c) => {
     }
   }
 
-  const params: Record<string, string> = {
-    limit: limit.toString(),
-    offset: offset.toString(),
-  };
+  // We merge votes from two sessions and then paginate locally.
+  // To keep pagination correct, we may need up to offset+limit from each session.
+  const requiredWindowSize = limit + offset;
 
   // Congress.gov API v3 uses `/house-vote/{congress}/{session}` for House
   // roll call votes. Senate votes do not have a dedicated endpoint yet.
@@ -345,25 +435,67 @@ congress.get("/votes", async (c) => {
   }
 
   try {
-    const responses = await Promise.all(
-      sessions.map((session) =>
-        congressFetch(`/house-vote/${congress_num}/${session}`, apiKey, params)
-      )
-    );
+    const CONGRESS_MAX_LIMIT = 250;
+
+    const fetchSessionVotes = async (session: string): Promise<{ votes: CongressHouseVote[]; totalCount?: number; errorStatus?: number; errorBody?: string }> => {
+      const votes: CongressHouseVote[] = [];
+      let pageOffset = 0;
+      let totalCount: number | undefined;
+
+      while (votes.length < requiredWindowSize) {
+        const remaining = requiredWindowSize - votes.length;
+        const pageLimit = Math.min(CONGRESS_MAX_LIMIT, remaining);
+        const resp = await congressFetch(`/house-vote/${congress_num}/${session}`, apiKey, {
+          limit: String(pageLimit),
+          offset: String(pageOffset),
+        });
+
+        if (!resp.ok) {
+          return {
+            votes,
+            totalCount,
+            errorStatus: resp.status,
+            errorBody: await resp.text().catch(() => ""),
+          };
+        }
+
+        const data = (await resp.json()) as {
+          houseRollCallVotes?: CongressHouseVote[];
+          pagination?: { count?: number };
+        };
+
+        if (data.pagination?.count != null) {
+          totalCount = data.pagination.count;
+        }
+
+        const pageVotes = data.houseRollCallVotes ?? [];
+        if (pageVotes.length === 0) break;
+
+        votes.push(...pageVotes);
+        if (pageVotes.length < pageLimit) break;
+
+        pageOffset += pageLimit;
+      }
+
+      return { votes, totalCount };
+    };
+
+    const sessionResults = await Promise.all(sessions.map((session) => fetchSessionVotes(session)));
 
     let allVotes: CongressHouseVote[] = [];
     let firstErrorStatus: number | null = null;
     let firstErrorBody = "";
-    for (const resp of responses) {
-      if (!resp.ok) {
-        if (firstErrorStatus === null) {
-          firstErrorStatus = resp.status;
-          firstErrorBody = await resp.text().catch(() => "");
-        }
-        continue;
+    let totalCount = 0;
+
+    for (const result of sessionResults) {
+      if (result.errorStatus && firstErrorStatus === null) {
+        firstErrorStatus = result.errorStatus;
+        firstErrorBody = result.errorBody ?? "";
       }
-      const data = (await resp.json()) as { houseRollCallVotes?: CongressHouseVote[] };
-      if (data.houseRollCallVotes) allVotes = allVotes.concat(data.houseRollCallVotes);
+      allVotes = allVotes.concat(result.votes);
+      if (result.totalCount != null) {
+        totalCount += result.totalCount;
+      }
     }
 
     if (allVotes.length === 0) {
@@ -386,13 +518,13 @@ congress.get("/votes", async (c) => {
       );
     }
 
-    // Sort merged results by date descending and trim to requested limit
+    // Sort merged results by date descending and apply requested pagination
     allVotes.sort((a, b) => {
       const da = a.startDate ?? "";
       const db = b.startDate ?? "";
       return db.localeCompare(da);
     });
-    allVotes = allVotes.slice(0, limit);
+    allVotes = allVotes.slice(offset, offset + limit);
 
     // Normalize to the shape the frontend expects
     const normalized = allVotes.map((v) => ({
@@ -435,7 +567,11 @@ congress.get("/votes", async (c) => {
       );
     }
 
-    return c.json({ votes: normalized }, 200, { "Cache-Control": "public, max-age=1800" });
+    return c.json(
+      { votes: normalized, count: totalCount || normalized.length, offset, limit },
+      200,
+      { "Cache-Control": "public, max-age=1800" }
+    );
   } catch (e) {
     return c.json(
       {
@@ -755,8 +891,8 @@ congress.get("/bills", async (c) => {
 
   const congress_num = c.req.query("congress") ?? "119";
   const billType = c.req.query("type");
-  const limit = parseInt(c.req.query("limit") ?? "20", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
   // Try Supabase first
   if (hasSupabase(c.env)) {
