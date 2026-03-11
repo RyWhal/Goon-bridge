@@ -46,12 +46,59 @@ correlation.get("/member/:bioguideId", async (c) => {
     return c.json({ error: "Member not found", detail: memberRes.error.message }, 404);
   }
 
+  // If the voting record cache is empty, trigger a live fetch from Congress.gov
+  // so the Follow the Money page isn't perpetually blank.
+  let recentVotes = votesRes.data ?? [];
+  if (recentVotes.length === 0 && c.env.CONGRESS_API_KEY) {
+    try {
+      // Determine member's chamber from DB
+      const memberChamber = (memberRes.data?.chamber ?? "").toLowerCase();
+      if (memberChamber === "house of representatives" || memberChamber === "house") {
+        // Fetch member votes via the internal endpoint
+        const workerUrl = new URL(c.req.url);
+        const apiUrl = `${workerUrl.origin}/api/congress/member-votes/${bioguideId}?congress=119&limit=20`;
+        const mvResp = await fetch(apiUrl, { headers: c.req.raw.headers });
+        if (mvResp.ok) {
+          const mvData = (await mvResp.json()) as {
+            votes?: Array<{
+              rollCallNumber: number;
+              date: string | null;
+              question: string | null;
+              description: string | null;
+              result: string | null;
+              position: string;
+              chamber: string;
+            }>;
+          };
+          if (mvData.votes?.length) {
+            recentVotes = mvData.votes.map((v) => ({
+              bioguide_id: bioguideId,
+              member_name: memberRes.data?.name ?? null,
+              party: memberRes.data?.party ?? null,
+              state: memberRes.data?.state ?? null,
+              congress: 119,
+              chamber: v.chamber,
+              roll_call_number: v.rollCallNumber,
+              vote_date: v.date,
+              question: v.question,
+              vote_description: v.description,
+              result: v.result,
+              position: v.position,
+            }));
+          }
+        }
+      }
+    } catch {
+      // Fall through with empty votes — best effort
+    }
+  }
+
   return c.json(
     {
       member: memberRes.data,
       fec_candidates: fecRes.data ?? [],
       top_donors: donorsRes.data ?? [],
-      recent_votes: votesRes.data ?? [],
+      recent_votes: recentVotes,
     },
     200,
     { "Cache-Control": "public, max-age=1800" }
