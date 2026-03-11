@@ -11,8 +11,7 @@
     "build:api": "cd api && tsc --noEmit",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && cd api && tsc --noEmit",
-    "deploy:api": "cd api && npx wrangler deploy --env production",
-    "deploy:api:staging": "cd api && npx wrangler deploy --env staging"
+    "deploy:api": "cd api && npx wrangler deploy"
   },
   "dependencies": {
     "react": "^18.2.0",
