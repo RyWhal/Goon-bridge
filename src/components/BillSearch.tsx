@@ -62,6 +62,34 @@ interface CosponsorListResponse {
   pagination?: { count?: number };
 }
 
+interface BillActionsResponse {
+  actions?: Array<{
+    actionDate?: string;
+    text?: string;
+    recordedVotes?: Array<{
+      chamber?: string;
+      congress?: string | number;
+      rollNumber?: string | number;
+      sessionNumber?: string | number;
+      date?: string;
+    }>;
+  }>;
+}
+
+interface VoteDetailResponse {
+  vote?: {
+    totalYea?: number;
+    totalNay?: number;
+    totalNotVoting?: number;
+    members?: Array<{
+      fullName?: string;
+      party?: string;
+      state?: string;
+      votePosition?: string;
+    }>;
+  };
+}
+
 /** Extract congress/type/number from a Congress.gov bill URL.
  *  e.g. https://api.congress.gov/v3/bill/119/hr/1234?format=json */
 function parseBillUrl(url?: string): { congress: string; type: string; number: string } | null {
@@ -108,6 +136,8 @@ export function BillSearch() {
   const list = useApi<BillListResponse>();
   const detail = useApi<BillDetailResponse>();
   const cosponsors = useApi<CosponsorListResponse>();
+  const actions = useApi<BillActionsResponse>();
+  const voteDetail = useApi<VoteDetailResponse>();
 
   const handleSearch = () => {
     setExpandedIndex(null);
@@ -127,7 +157,19 @@ export function BillSearch() {
     if (path) {
       detail.fetchData(path);
       cosponsors.fetchData(`${path}/cosponsors?limit=50`);
+      actions.fetchData(`${path}/actions?limit=50`);
     }
+  };
+
+  const fetchRecordedVote = (vote: {
+    chamber?: string;
+    congress?: string | number;
+    rollNumber?: string | number;
+  }) => {
+    if (!vote.congress || !vote.chamber || !vote.rollNumber) return;
+    voteDetail.fetchData(
+      `/api/congress/votes/${vote.congress}/${vote.chamber.toLowerCase()}/${vote.rollNumber}`
+    );
   };
 
   return (
@@ -248,6 +290,9 @@ export function BillSearch() {
                         cosponsorCount={cosponsors.data?.pagination?.count}
                         rawDetail={detail.data}
                         rawCosponsors={cosponsors.data}
+                        actions={actions.data?.actions}
+                        onLoadVote={fetchRecordedVote}
+                        voteDetail={voteDetail.data?.vote}
                       />
                     )}
 
@@ -276,12 +321,22 @@ function BillDetailCard({
   cosponsorCount,
   rawDetail,
   rawCosponsors,
+  actions,
+  onLoadVote,
+  voteDetail,
 }: {
   bill: NonNullable<BillDetailResponse["bill"]>;
   cosponsorList?: Cosponsor[];
   cosponsorCount?: number;
   rawDetail: BillDetailResponse;
   rawCosponsors: CosponsorListResponse | null;
+  actions?: BillActionsResponse["actions"];
+  onLoadVote: (vote: {
+    chamber?: string;
+    congress?: string | number;
+    rollNumber?: string | number;
+  }) => void;
+  voteDetail?: VoteDetailResponse["vote"];
 }) {
   const [showCosponsors, setShowCosponsors] = useState(false);
 
@@ -290,6 +345,7 @@ function BillDetailCard({
   const sponsors = bill.sponsors ?? [];
   const cosponsorFinal = cosponsorList ?? bill.cosponsorList ?? [];
   const totalCosponsors = cosponsorCount ?? bill.cosponsors?.count ?? cosponsorFinal.length;
+  const recordedVotes = (actions ?? []).flatMap((a) => a.recordedVotes ?? []);
 
   return (
     <div className="card border-vibe-accent/30">
@@ -428,6 +484,40 @@ function BillDetailCard({
           {bill.cboCostEstimates.map((e, i) => (
             <p key={i}>{e.description}</p>
           ))}
+        </div>
+      )}
+
+      {recordedVotes.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">Related Roll Call Votes</p>
+          <div className="space-y-1">
+            {recordedVotes.slice(0, 10).map((v, i) => (
+              <button
+                key={i}
+                className="w-full text-left px-2 py-1 rounded bg-vibe-surface text-xs hover:border hover:border-vibe-accent/40"
+                onClick={() => onLoadVote(v)}
+              >
+                {v.chamber} Roll #{v.rollNumber} ({v.date ?? `Session ${v.sessionNumber ?? "?"}`})
+              </button>
+            ))}
+          </div>
+          {voteDetail && (
+            <div className="mt-2 p-2 rounded bg-vibe-surface text-xs">
+              <p>
+                Yea {voteDetail.totalYea ?? "—"} · Nay {voteDetail.totalNay ?? "—"} · Not Voting {voteDetail.totalNotVoting ?? "—"}
+              </p>
+              {voteDetail.members && voteDetail.members.length > 0 && (
+                <div className="mt-1 max-h-40 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1">
+                  {voteDetail.members.map((m, mi) => (
+                    <div key={mi} className="flex justify-between">
+                      <span className="truncate">{m.fullName}</span>
+                      <span className="text-vibe-dim ml-2">{m.party}-{m.state} {m.votePosition}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
