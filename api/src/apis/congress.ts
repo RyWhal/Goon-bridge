@@ -470,7 +470,6 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
       const resp = await congressFetch(`/house-vote/${cong}/${session}/${rollCallNumber}`, apiKey);
       if (resp.ok) {
         const raw = (await resp.json()) as Record<string, unknown>;
-        // Normalize to the shape the frontend expects
         const v = raw.houseRollCallVote as Record<string, unknown> | undefined;
         if (v) {
           const partyTotals = v.votePartyTotal as Array<Record<string, unknown>> | undefined;
@@ -482,6 +481,14 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
               totalNotVoting += (p.notVoting as number) ?? 0;
             }
           }
+
+          // Fetch member-level votes and cache to Supabase in the background
+          if (hasSupabase(c.env)) {
+            c.executionCtx.waitUntil(
+              fetchAndCacheMemberVotes(c.env, apiKey, cong, session, rollCallNumber)
+            );
+          }
+
           return c.json({
             vote: {
               congress: v.congress,
@@ -510,6 +517,236 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
 
   return c.json({ error: `Vote not found: congress ${cong}, roll call ${rollCallNumber}` }, 404);
 });
+
+// ── GET /api/congress/member-votes/:bioguideId ──────────────────────────────
+// Fetch a member's voting record from Congress.gov. This populates the
+// member_votes table so the Follow the Money page can show voting data.
+congress.get("/member-votes/:bioguideId", async (c) => {
+  const apiKey = c.env.CONGRESS_API_KEY;
+  if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
+
+  const bioguideId = c.req.param("bioguideId");
+  const congressNum = c.req.query("congress") ?? "119";
+  const limit = parseInt(c.req.query("limit") ?? "20", 10);
+
+  // Fetch recent House votes and check member positions
+  const sessions = ["2", "1"];
+  type HouseVoteListItem = {
+    congress?: number;
+    sessionNumber?: number;
+    rollCallNumber?: number;
+    startDate?: string;
+    voteQuestion?: string;
+    result?: string;
+    voteType?: string;
+    url?: string;
+  };
+
+  let allVotes: HouseVoteListItem[] = [];
+  for (const session of sessions) {
+    try {
+      const resp = await congressFetch(`/house-vote/${congressNum}/${session}`, apiKey, {
+        limit: limit.toString(),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { houseRollCallVotes?: HouseVoteListItem[] };
+        if (data.houseRollCallVotes) allVotes = allVotes.concat(data.houseRollCallVotes);
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  allVotes.sort((a, b) => (b.startDate ?? "").localeCompare(a.startDate ?? ""));
+  allVotes = allVotes.slice(0, limit);
+
+  // For each vote, fetch member-level data to find this member's position
+  const memberVotes: Array<{
+    rollCallNumber: number;
+    date: string | null;
+    question: string | null;
+    description: string | null;
+    result: string | null;
+    position: string;
+    chamber: string;
+  }> = [];
+
+  // Fetch member votes in batches of 5 to avoid rate limits
+  for (let i = 0; i < allVotes.length; i += 5) {
+    const batch = allVotes.slice(i, i + 5);
+    const results = await Promise.all(
+      batch.map(async (vote) => {
+        if (!vote.rollCallNumber) return null;
+        const session = String(vote.sessionNumber ?? 1);
+        try {
+          const resp = await congressFetch(
+            `/house-vote/${congressNum}/${session}/${vote.rollCallNumber}/members`,
+            apiKey,
+            { limit: "500" }
+          );
+          if (!resp.ok) return null;
+          const data = (await resp.json()) as {
+            members?: Array<{
+              bioguideId?: string;
+              voteCast?: string;
+            }>;
+          };
+          const memberVote = data.members?.find(
+            (m) => m.bioguideId === bioguideId
+          );
+          if (!memberVote) return null;
+          return {
+            rollCallNumber: vote.rollCallNumber,
+            date: vote.startDate ?? null,
+            question: vote.voteQuestion ?? null,
+            description: vote.voteType ?? null,
+            result: vote.result ?? null,
+            position: memberVote.voteCast ?? "Unknown",
+            chamber: "House",
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+    for (const r of results) {
+      if (r) memberVotes.push(r);
+    }
+  }
+
+  // Cache to Supabase in background
+  if (hasSupabase(c.env) && memberVotes.length) {
+    c.executionCtx.waitUntil(
+      cacheMemberVotesToSupabase(c.env, bioguideId, parseInt(congressNum, 10), memberVotes)
+    );
+  }
+
+  return c.json({
+    bioguide_id: bioguideId,
+    votes: memberVotes,
+    count: memberVotes.length,
+  }, 200, { "Cache-Control": "public, max-age=1800" });
+});
+
+/**
+ * Fetch member-level votes for a single roll call and cache to member_votes table.
+ */
+async function fetchAndCacheMemberVotes(
+  env: Env["Bindings"],
+  apiKey: string,
+  congressNum: string,
+  session: string,
+  rollCallNumber: string
+) {
+  try {
+    const resp = await congressFetch(
+      `/house-vote/${congressNum}/${session}/${rollCallNumber}/members`,
+      apiKey,
+      { limit: "500" }
+    );
+    if (!resp.ok) return;
+    const data = (await resp.json()) as {
+      members?: Array<{
+        bioguideId?: string;
+        voteCast?: string;
+      }>;
+    };
+    if (!data.members?.length) return;
+
+    const sb = getSupabase(env);
+
+    // Ensure the vote row exists
+    const { data: voteRow } = await sb
+      .from("votes")
+      .select("id")
+      .eq("congress", parseInt(congressNum, 10))
+      .eq("chamber", "house")
+      .eq("roll_call_number", parseInt(rollCallNumber, 10))
+      .single();
+
+    if (!voteRow) return;
+
+    const rows = data.members
+      .filter((m) => m.bioguideId && m.voteCast)
+      .map((m) => ({
+        vote_id: voteRow.id,
+        bioguide_id: m.bioguideId!,
+        position: m.voteCast!,
+      }));
+
+    if (rows.length > 0) {
+      await sb.from("member_votes").upsert(rows, {
+        onConflict: "vote_id,bioguide_id",
+      });
+    }
+  } catch {
+    // Best-effort caching
+  }
+}
+
+/**
+ * Cache a member's vote positions to Supabase.
+ */
+async function cacheMemberVotesToSupabase(
+  env: Env["Bindings"],
+  bioguideId: string,
+  congressNum: number,
+  memberVotes: Array<{
+    rollCallNumber: number;
+    date: string | null;
+    question: string | null;
+    description: string | null;
+    result: string | null;
+    position: string;
+    chamber: string;
+  }>
+) {
+  try {
+    const sb = getSupabase(env);
+
+    for (const mv of memberVotes) {
+      // Ensure vote row exists
+      const { data: existing } = await sb
+        .from("votes")
+        .select("id")
+        .eq("congress", congressNum)
+        .eq("chamber", "house")
+        .eq("roll_call_number", mv.rollCallNumber)
+        .single();
+
+      let voteId: number;
+      if (existing) {
+        voteId = existing.id;
+      } else {
+        // Insert the vote
+        const { data: inserted } = await sb
+          .from("votes")
+          .upsert({
+            congress: congressNum,
+            chamber: "house",
+            roll_call_number: mv.rollCallNumber,
+            date: mv.date,
+            question: mv.question,
+            description: mv.description,
+            result: mv.result,
+          }, { onConflict: "congress,chamber,roll_call_number" })
+          .select("id")
+          .single();
+        if (!inserted) continue;
+        voteId = inserted.id;
+      }
+
+      // Insert member vote
+      await sb.from("member_votes").upsert({
+        vote_id: voteId,
+        bioguide_id: bioguideId,
+        position: mv.position,
+      }, { onConflict: "vote_id,bioguide_id" });
+    }
+  } catch {
+    // Best-effort
+  }
+}
 
 // ── GET /api/congress/bills ──────────────────────────────────────────────────
 congress.get("/bills", async (c) => {

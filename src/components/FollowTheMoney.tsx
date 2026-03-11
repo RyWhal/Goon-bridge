@@ -97,8 +97,9 @@ export function FollowTheMoney() {
     // Fire correlation request (Supabase-backed)
     correlation.fetchData(`/api/correlation/member/${member.bioguideId}`);
 
-    // Also trigger FEC linking + contribution fetch
-    link.fetchData(`/api/fec/link/${member.bioguideId}`);
+    // Link FEC candidates first, THEN fetch contributions (contributions
+    // endpoint requires FEC candidates to be linked in Supabase first)
+    await link.fetchData(`/api/fec/link/${member.bioguideId}`);
     contributions.fetchData(`/api/fec/member/${member.bioguideId}/contributions`);
   };
 

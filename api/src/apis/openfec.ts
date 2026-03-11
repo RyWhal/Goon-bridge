@@ -291,35 +291,55 @@ openfec.get("/link/:bioguideId", async (c) => {
     return c.json({ error: "Member not found in database" }, 404);
   }
 
-  // Search FEC by name + state
+  // Search FEC by name + state. Congress.gov stores names as "Last, First"
+  // but FEC search works best with simpler queries, so try full name first
+  // then fall back to last name only.
   const searchParams: Record<string, string> = {
     q: member.name,
     per_page: "5",
   };
   if (member.state) searchParams["state"] = member.state;
-  // If they have a district, they're in the House
   if (member.district != null) {
     searchParams["office"] = "H";
+  } else {
+    // Senators don't have a district
+    searchParams["office"] = "S";
   }
+
+  let candidates: Array<{
+    candidate_id?: string;
+    name?: string;
+    party_full?: string;
+    party?: string;
+    state?: string;
+    office?: string;
+    election_years?: number[];
+  }> = [];
 
   try {
     const resp = await fecFetch("/candidates/search/", apiKey, searchParams);
-    if (!resp.ok) {
-      return c.json({ error: `FEC API: ${resp.status}` }, 502);
+    if (resp.ok) {
+      const data = (await resp.json()) as { results?: typeof candidates };
+      candidates = (data.results ?? []).filter((r) => r.candidate_id);
     }
-    const data = (await resp.json()) as {
-      results?: Array<{
-        candidate_id?: string;
-        name?: string;
-        party_full?: string;
-        party?: string;
-        state?: string;
-        office?: string;
-        election_years?: number[];
-      }>;
-    };
 
-    const candidates = (data.results ?? []).filter((r) => r.candidate_id);
+    // If no results, try with just last name (before the comma)
+    if (candidates.length === 0) {
+      const lastName = member.name?.split(",")[0]?.trim();
+      if (lastName && lastName !== member.name) {
+        const retryParams = { ...searchParams, q: lastName };
+        const resp2 = await fecFetch("/candidates/search/", apiKey, retryParams);
+        if (resp2.ok) {
+          const data2 = (await resp2.json()) as { results?: typeof candidates };
+          candidates = (data2.results ?? []).filter((r) => r.candidate_id);
+        }
+      }
+    }
+  } catch {
+    return c.json({ error: "Failed to search FEC API" }, 502);
+  }
+
+  try {
 
     // Link all matching candidates to this bioguide_id
     if (candidates.length > 0) {
