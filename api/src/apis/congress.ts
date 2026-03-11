@@ -310,35 +310,48 @@ congress.get("/votes", async (c) => {
     offset: offset.toString(),
   };
 
-  // Congress.gov API v3 requires both congress AND chamber in the path
-  // to return a vote listing. `/vote/{congress}` alone is not a valid
-  // list endpoint — it returns 404. When no chamber is selected we
-  // request both chambers in parallel and merge.
-  const chambers = chamber ? [chamber] : ["house", "senate"];
+  // Congress.gov API v3 uses `/house-vote/{congress}/{session}` for House
+  // roll call votes. Senate votes do not have a dedicated endpoint yet.
+  // Each congress has two sessions (1 and 2). We fetch both sessions and
+  // merge so the user doesn't need to pick a session.
+  const sessions = ["1", "2"];
 
-  type CongressVote = {
+  // Raw shape returned by the Congress.gov /house-vote list endpoint
+  type CongressHouseVote = {
     congress?: number;
-    chamber?: string;
-    number?: number;
-    date?: string;
-    question?: string;
-    description?: string;
+    sessionNumber?: number;
+    rollCallNumber?: number;
+    startDate?: string;
+    voteQuestion?: string;
     result?: string;
-    totalYea?: number;
-    totalNay?: number;
-    totalNotVoting?: number;
-    bill?: { congress?: number; type?: string; number?: number };
+    voteType?: string;
+    legislationType?: string;
+    legislationUrl?: string;
+    url?: string;
     [key: string]: unknown;
   };
 
+  // Only House votes are available in the API right now
+  if (chamber === "senate") {
+    return c.json(
+      {
+        votes: [],
+        count: 0,
+        notice: "Senate roll call votes are not yet available in the Congress.gov API. Only House votes are supported.",
+      },
+      200,
+      { "Cache-Control": "public, max-age=1800" }
+    );
+  }
+
   try {
     const responses = await Promise.all(
-      chambers.map((ch) =>
-        congressFetch(`/vote/${congress_num}/${ch}`, apiKey, params)
+      sessions.map((session) =>
+        congressFetch(`/house-vote/${congress_num}/${session}`, apiKey, params)
       )
     );
 
-    let allVotes: CongressVote[] = [];
+    let allVotes: CongressHouseVote[] = [];
     let firstErrorStatus: number | null = null;
     let firstErrorBody = "";
     for (const resp of responses) {
@@ -349,8 +362,8 @@ congress.get("/votes", async (c) => {
         }
         continue;
       }
-      const data = (await resp.json()) as { votes?: CongressVote[] };
-      if (data.votes) allVotes = allVotes.concat(data.votes);
+      const data = (await resp.json()) as { houseRollCallVotes?: CongressHouseVote[] };
+      if (data.houseRollCallVotes) allVotes = allVotes.concat(data.houseRollCallVotes);
     }
 
     if (allVotes.length === 0) {
@@ -366,8 +379,6 @@ congress.get("/votes", async (c) => {
           502
         );
       }
-      // API returned 200 but with no vote data — return empty array so
-      // the frontend can show an appropriate "no results" message.
       return c.json(
         { votes: [], count: 0 },
         200,
@@ -377,33 +388,45 @@ congress.get("/votes", async (c) => {
 
     // Sort merged results by date descending and trim to requested limit
     allVotes.sort((a, b) => {
-      const da = a.date ?? "";
-      const db = b.date ?? "";
+      const da = a.startDate ?? "";
+      const db = b.startDate ?? "";
       return db.localeCompare(da);
     });
-    if (!chamber) {
-      allVotes = allVotes.slice(0, limit);
-    }
+    allVotes = allVotes.slice(0, limit);
+
+    // Normalize to the shape the frontend expects
+    const normalized = allVotes.map((v) => ({
+      congress: v.congress,
+      chamber: "House",
+      rollCallNumber: v.rollCallNumber,
+      date: v.startDate,
+      question: v.voteQuestion ?? v.voteType,
+      description: v.legislationType
+        ? `${v.legislationType} — ${v.voteType ?? ""}`
+        : v.voteType,
+      result: v.result,
+      url: v.url,
+    }));
 
     // Cache votes to Supabase in the background
-    if (hasSupabase(c.env) && allVotes.length) {
+    if (hasSupabase(c.env) && normalized.length) {
       const sb = getSupabase(c.env);
-      const rows = allVotes
-        .filter((v) => v.congress && v.chamber && v.number)
+      const rows = normalized
+        .filter((v) => v.congress && v.rollCallNumber)
         .map((v) => ({
           congress: v.congress!,
-          chamber: (v.chamber ?? "").toLowerCase(),
-          roll_call_number: v.number!,
+          chamber: "house",
+          roll_call_number: v.rollCallNumber!,
           date: v.date ?? null,
           question: v.question ?? null,
           description: v.description ?? null,
           result: v.result ?? null,
-          total_yea: v.totalYea ?? null,
-          total_nay: v.totalNay ?? null,
-          total_not_voting: v.totalNotVoting ?? null,
-          bill_congress: v.bill?.congress ?? null,
-          bill_type: v.bill?.type ?? null,
-          bill_number: v.bill?.number ?? null,
+          total_yea: null,
+          total_nay: null,
+          total_not_voting: null,
+          bill_congress: null,
+          bill_type: null,
+          bill_number: null,
         }));
       c.executionCtx.waitUntil(
         Promise.resolve(
@@ -411,12 +434,6 @@ congress.get("/votes", async (c) => {
         )
       );
     }
-
-    // Normalize the response: Congress.gov uses `number` but frontend expects `rollCallNumber`
-    const normalized = allVotes.map((v) => ({
-      ...v,
-      rollCallNumber: v.number,
-    }));
 
     return c.json({ votes: normalized }, 200, { "Cache-Control": "public, max-age=1800" });
   } catch (e) {
@@ -434,23 +451,64 @@ congress.get("/votes", async (c) => {
 });
 
 // ── GET /api/congress/votes/:congress/:chamber/:rollCallNumber ───────────────
+// The Congress.gov v3 item-level endpoint requires a session number:
+//   /house-vote/{congress}/{session}/{rollCallNumber}
+// Since the frontend doesn't track session, we try both sessions.
 congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
 
   const { congress: cong, chamber, rollCallNumber } = c.req.param();
-  const path = `/vote/${cong}/${chamber}/${rollCallNumber}`;
 
-  try {
-    const resp = await congressFetch(path, apiKey);
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
-    }
-    const data: unknown = await resp.json();
-    return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
-  } catch {
-    return c.json({ error: "Failed to fetch from Congress API" }, 502);
+  if (chamber.toLowerCase() === "senate") {
+    return c.json({ error: "Senate vote details are not yet available in the Congress.gov API" }, 400);
   }
+
+  // Try session 2 first (more recent), then session 1
+  for (const session of ["2", "1"]) {
+    try {
+      const resp = await congressFetch(`/house-vote/${cong}/${session}/${rollCallNumber}`, apiKey);
+      if (resp.ok) {
+        const raw = (await resp.json()) as Record<string, unknown>;
+        // Normalize to the shape the frontend expects
+        const v = raw.houseRollCallVote as Record<string, unknown> | undefined;
+        if (v) {
+          const partyTotals = v.votePartyTotal as Array<Record<string, unknown>> | undefined;
+          let totalYea = 0, totalNay = 0, totalNotVoting = 0;
+          if (partyTotals) {
+            for (const p of partyTotals) {
+              totalYea += (p.yea as number) ?? 0;
+              totalNay += (p.nay as number) ?? 0;
+              totalNotVoting += (p.notVoting as number) ?? 0;
+            }
+          }
+          return c.json({
+            vote: {
+              congress: v.congress,
+              chamber: "House",
+              date: v.startDate,
+              question: v.voteQuestion,
+              description: v.voteType,
+              result: v.result,
+              totalYea,
+              totalNay,
+              totalNotVoting,
+            },
+            raw: v,
+          }, 200, { "Cache-Control": "public, max-age=1800" });
+        }
+        return c.json(raw, 200, { "Cache-Control": "public, max-age=1800" });
+      }
+      // 404 means wrong session — try the other one
+      if (resp.status !== 404) {
+        return c.json({ error: `Congress API: ${resp.status}` }, 502);
+      }
+    } catch {
+      // Try next session
+    }
+  }
+
+  return c.json({ error: `Vote not found: congress ${cong}, roll call ${rollCallNumber}` }, 404);
 });
 
 // ── GET /api/congress/bills ──────────────────────────────────────────────────
