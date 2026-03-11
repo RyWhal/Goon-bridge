@@ -9,6 +9,7 @@ import { weather } from "./apis/weather";
 import { earthquakes } from "./apis/earthquakes";
 import { sunrise } from "./apis/sunrise";
 import { lunar } from "./apis/lunar";
+import { correlation } from "./apis/correlation";
 
 const app = new Hono<Env>();
 
@@ -27,6 +28,7 @@ app.get("/api/health", (c) => {
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,
+      supabase: !!(c.env.SUPABASE_URL && c.env.SUPABASE_SERVICE_KEY),
       weather: true,
       earthquakes: true,
       sunrise: true,
@@ -42,6 +44,7 @@ app.route("/api/weather", weather);
 app.route("/api/earthquakes", earthquakes);
 app.route("/api/sunrise", sunrise);
 app.route("/api/lunar", lunar);
+app.route("/api/correlation", correlation);
 
 // ── Vote context (aggregated) ────────────────────────────────────────────────
 // Returns all correlation data for a given date in a single response

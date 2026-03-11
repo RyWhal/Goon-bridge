@@ -8,6 +8,7 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.99.0",
     "hono": "^4.6.0"
   },
   "devDependencies": {
