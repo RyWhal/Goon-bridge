@@ -36,6 +36,15 @@ function parseBoundedInt(value: string | undefined, fallback: number, min: numbe
   return Math.min(max, Math.max(min, parsed));
 }
 
+function asNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
 
 type CongressPartyHistoryItem = {
   partyName?: string;
@@ -401,12 +410,12 @@ congress.get("/votes", async (c) => {
   const requiredWindowSize = limit + offset;
 
   // Congress.gov API v3 uses `/house-vote/{congress}/{session}` for House
-  // roll call votes. Senate votes do not have a dedicated endpoint yet.
+  // and `/senate-vote/{congress}/{session}` for Senate roll call votes.
   // Each congress has two sessions (1 and 2). We fetch both sessions and
   // merge so the user doesn't need to pick a session.
   const sessions = ["1", "2"];
 
-  // Raw shape returned by the Congress.gov /house-vote list endpoint
+  // Raw shape returned by the Congress.gov vote list endpoints.
   type CongressHouseVote = {
     congress?: number;
     sessionNumber?: number;
@@ -420,19 +429,9 @@ congress.get("/votes", async (c) => {
     url?: string;
     [key: string]: unknown;
   };
-
-  // Only House votes are available in the API right now
-  if (chamber === "senate") {
-    return c.json(
-      {
-        votes: [],
-        count: 0,
-        notice: "Senate roll call votes are not yet available in the Congress.gov API. Only House votes are supported.",
-      },
-      200,
-      { "Cache-Control": "public, max-age=1800" }
-    );
-  }
+  const chamberNormalized = chamber?.toLowerCase();
+  const votePathPrefix = chamberNormalized === "senate" ? "senate-vote" : "house-vote";
+  const chamberLabel = chamberNormalized === "senate" ? "Senate" : "House";
 
   try {
     const CONGRESS_MAX_LIMIT = 250;
@@ -445,7 +444,7 @@ congress.get("/votes", async (c) => {
       while (votes.length < requiredWindowSize) {
         const remaining = requiredWindowSize - votes.length;
         const pageLimit = Math.min(CONGRESS_MAX_LIMIT, remaining);
-        const resp = await congressFetch(`/house-vote/${congress_num}/${session}`, apiKey, {
+        const resp = await congressFetch(`/${votePathPrefix}/${congress_num}/${session}`, apiKey, {
           limit: String(pageLimit),
           offset: String(pageOffset),
         });
@@ -461,6 +460,7 @@ congress.get("/votes", async (c) => {
 
         const data = (await resp.json()) as {
           houseRollCallVotes?: CongressHouseVote[];
+          senateRollCallVotes?: CongressHouseVote[];
           pagination?: { count?: number };
         };
 
@@ -468,7 +468,7 @@ congress.get("/votes", async (c) => {
           totalCount = data.pagination.count;
         }
 
-        const pageVotes = data.houseRollCallVotes ?? [];
+        const pageVotes = data.houseRollCallVotes ?? data.senateRollCallVotes ?? [];
         if (pageVotes.length === 0) break;
 
         votes.push(...pageVotes);
@@ -529,7 +529,7 @@ congress.get("/votes", async (c) => {
     // Normalize to the shape the frontend expects
     const normalized = allVotes.map((v) => ({
       congress: v.congress,
-      chamber: "House",
+      chamber: chamberLabel,
       rollCallNumber: v.rollCallNumber,
       date: v.startDate,
       question: v.voteQuestion ?? v.voteType,
@@ -547,7 +547,7 @@ congress.get("/votes", async (c) => {
         .filter((v) => v.congress && v.rollCallNumber)
         .map((v) => ({
           congress: v.congress!,
-          chamber: "house",
+          chamber: chamberLabel.toLowerCase(),
           roll_call_number: v.rollCallNumber!,
           date: v.date ?? null,
           question: v.question ?? null,
@@ -596,26 +596,34 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
 
   const { congress: cong, chamber, rollCallNumber } = c.req.param();
 
-  if (chamber.toLowerCase() === "senate") {
-    return c.json({ error: "Senate vote details are not yet available in the Congress.gov API" }, 400);
-  }
+  const chamberNormalized = chamber.toLowerCase();
+  const votePathPrefix = chamberNormalized === "senate" ? "senate-vote" : "house-vote";
+  const chamberLabel = chamberNormalized === "senate" ? "Senate" : "House";
 
   // Try session 2 first (more recent), then session 1
   for (const session of ["2", "1"]) {
     try {
-      const resp = await congressFetch(`/house-vote/${cong}/${session}/${rollCallNumber}`, apiKey);
+      const resp = await congressFetch(`/${votePathPrefix}/${cong}/${session}/${rollCallNumber}`, apiKey);
       if (resp.ok) {
         const raw = (await resp.json()) as Record<string, unknown>;
-        const v = raw.houseRollCallVote as Record<string, unknown> | undefined;
+        const v =
+          (raw.houseRollCallVote as Record<string, unknown> | undefined) ??
+          (raw.senateRollCallVote as Record<string, unknown> | undefined);
         if (v) {
           const partyTotals = v.votePartyTotal as Array<Record<string, unknown>> | undefined;
           let totalYea = 0, totalNay = 0, totalNotVoting = 0;
           if (partyTotals) {
             for (const p of partyTotals) {
-              totalYea += (p.yea as number) ?? 0;
-              totalNay += (p.nay as number) ?? 0;
-              totalNotVoting += (p.notVoting as number) ?? 0;
+              totalYea += asNumber(p.yeaTotal ?? p.yea);
+              totalNay += asNumber(p.nayTotal ?? p.nay);
+              totalNotVoting += asNumber(p.notVotingTotal ?? p.notVoting);
             }
+          }
+
+          if (!partyTotals?.length) {
+            totalYea = asNumber(v.yeaTotal ?? v.totalYea);
+            totalNay = asNumber(v.nayTotal ?? v.totalNay);
+            totalNotVoting = asNumber(v.notVotingTotal ?? v.totalNotVoting);
           }
 
           // Fetch member-level votes and cache to Supabase in the background
@@ -628,7 +636,7 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
           return c.json({
             vote: {
               congress: v.congress,
-              chamber: "House",
+              chamber: chamberLabel,
               date: v.startDate,
               question: v.voteQuestion,
               description: v.voteType,
@@ -636,6 +644,16 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
               totalYea,
               totalNay,
               totalNotVoting,
+              members:
+                (v.members as Array<Record<string, unknown>> | undefined)?.map((m) => ({
+                  bioguideId: m.bioguideId,
+                  firstName: m.firstName,
+                  lastName: m.lastName,
+                  fullName: m.fullName,
+                  party: m.party,
+                  state: m.state,
+                  votePosition: m.votePosition ?? m.memberVoted,
+                })) ?? [],
             },
             raw: v,
           }, 200, { "Cache-Control": "public, max-age=1800" });
@@ -894,6 +912,20 @@ congress.get("/bills", async (c) => {
   const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
+  function normalizeDbBill(row: Record<string, unknown>) {
+    return {
+      congress: row.congress,
+      type: row.bill_type,
+      number: row.bill_number,
+      title: row.title,
+      policyArea: row.policy_area ? { name: row.policy_area } : undefined,
+      latestAction: {
+        text: row.latest_action_text,
+        actionDate: row.latest_action_date,
+      },
+    };
+  }
+
   // Try Supabase first
   if (hasSupabase(c.env)) {
     try {
@@ -913,7 +945,7 @@ congress.get("/bills", async (c) => {
 
       if (!error && data && data.length > 0) {
         return c.json(
-          { bills: data, count: count ?? data.length },
+          { bills: data.map((row) => normalizeDbBill(row as Record<string, unknown>)), count: count ?? data.length },
           200,
           { "Cache-Control": "public, max-age=1800" }
         );
@@ -988,6 +1020,30 @@ congress.get("/bills/:congress/:type/:number", async (c) => {
 
   try {
     const resp = await congressFetch(path, apiKey);
+    if (!resp.ok) {
+      return c.json({ error: `Congress API: ${resp.status}` }, 502);
+    }
+    const data: unknown = await resp.json();
+    return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
+  } catch {
+    return c.json({ error: "Failed to fetch from Congress API" }, 502);
+  }
+});
+
+// ── GET /api/congress/bills/:congress/:type/:number/actions ─────────────────
+congress.get("/bills/:congress/:type/:number/actions", async (c) => {
+  const apiKey = c.env.CONGRESS_API_KEY;
+  if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
+
+  const { congress: cong, type, number } = c.req.param();
+  const limit = parseBoundedInt(c.req.query("limit"), 50, 1, 250);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
+
+  try {
+    const resp = await congressFetch(`/bill/${cong}/${type}/${number}/actions`, apiKey, {
+      limit: String(limit),
+      offset: String(offset),
+    });
     if (!resp.ok) {
       return c.json({ error: `Congress API: ${resp.status}` }, 502);
     }

@@ -179,7 +179,7 @@ export function VoteSearch() {
             onChange={(e) => setChamber(e.target.value)}
           >
             <option value="">House (All Sessions)</option>
-            <option value="senate">Senate (not yet available)</option>
+            <option value="senate">Senate (All Sessions)</option>
           </select>
           <select
             className="select"
