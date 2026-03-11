@@ -23,6 +23,13 @@
 - Track changes over time around key votes or news events
 - Note: unofficial API, terms of service considerations apply
 
+### Home State Sports Team Win Records
+- Track performance of professional (NFL, NBA, MLB, NHL) and college teams from the congressman's home state/district
+- Sources: ESPN API, Sports Reference (sports-reference.com), SportsDataIO, or The Sports DB (free tier)
+- Correlate win/loss records around vote dates — does a losing streak affect legislative behavior?
+- Could also look at playoff appearances, championships, or rivalry game outcomes as discrete events
+- College teams may be more relevant for districts with no pro franchises
+
 ### Astrology Data
 - Mercury retrograde dates: publicly available, many astrology APIs and datasets exist (e.g. astro-seek.com, astrology.com)
 - Congressman birth date horoscopes: would need birth dates (publicly available for many members)
