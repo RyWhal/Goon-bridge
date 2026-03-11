@@ -46,6 +46,7 @@ type CongressMemberLike = {
   party?: string;
   partyName?: string;
   partyHistory?: CongressPartyHistoryItem[];
+  terms?: { item?: Array<{ party?: string; partyName?: string; partyAbbreviation?: string }> };
 };
 
 function normalizePartyValue(raw?: string | null): string | null {
@@ -68,11 +69,19 @@ function normalizePartyValue(raw?: string | null): string | null {
 }
 
 function extractMemberParty(member: CongressMemberLike): string | null {
+  const history = Array.isArray(member.partyHistory)
+    ? member.partyHistory
+    : (member.partyHistory as unknown as { item?: CongressPartyHistoryItem[] } | undefined)?.item;
+  const currentTerm = member.terms?.item?.[0];
+
   const candidates = [
     normalizePartyValue(member.party),
     normalizePartyValue(member.partyName),
-    normalizePartyValue(member.partyHistory?.[0]?.partyAbbreviation),
-    normalizePartyValue(member.partyHistory?.[0]?.partyName),
+    normalizePartyValue(history?.[0]?.partyAbbreviation),
+    normalizePartyValue(history?.[0]?.partyName),
+    normalizePartyValue(currentTerm?.partyAbbreviation),
+    normalizePartyValue(currentTerm?.partyName),
+    normalizePartyValue(currentTerm?.party),
   ];
   return candidates.find((value): value is string => !!value) ?? null;
 }
