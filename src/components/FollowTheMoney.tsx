@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useApi } from "../hooks/useApi";
+import { JsonViewer } from "./JsonViewer";
 
 interface MemberResult {
   name?: string;
@@ -54,6 +55,7 @@ interface LinkResponse {
   bioguide_id: string;
   fec_candidates: Array<{ candidate_id?: string; name?: string }>;
   count?: number;
+  message?: string;
 }
 
 interface ContributionsResponse {
@@ -72,11 +74,13 @@ interface ContributionsResponse {
   }>;
   count: number;
   source: string;
+  message?: string;
 }
 
 export function FollowTheMoney() {
   const [query, setQuery] = useState("");
   const [selectedMember, setSelectedMember] = useState<MemberResult | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
   const search = useApi<MemberSearchResponse>();
   const correlation = useApi<CorrelationResponse>();
   const link = useApi<LinkResponse>();
@@ -93,6 +97,7 @@ export function FollowTheMoney() {
   const handleSelectMember = async (member: MemberResult) => {
     if (!member.bioguideId) return;
     setSelectedMember(member);
+    setShowDebug(false);
 
     // Fire correlation request (Supabase-backed)
     correlation.fetchData(`/api/correlation/member/${member.bioguideId}`);
@@ -103,6 +108,13 @@ export function FollowTheMoney() {
     contributions.fetchData(`/api/fec/member/${member.bioguideId}/contributions`);
   };
 
+  const hasAnyDonorData =
+    (correlation.data?.top_donors && correlation.data.top_donors.length > 0) ||
+    (contributions.data?.contributions && contributions.data.contributions.length > 0);
+
+  const hasAnyVoteData =
+    correlation.data?.recent_votes && correlation.data.recent_votes.length > 0;
+
   return (
     <div className="space-y-4">
       {/* Search */}
@@ -112,7 +124,7 @@ export function FollowTheMoney() {
         </h2>
         <p className="text-xs text-vibe-dim mb-3">
           Search for a member of Congress to see their top donors alongside their
-          voting record.
+          voting record. Data is sourced from FEC filings and Congress.gov.
         </p>
         <div className="flex flex-col sm:flex-row gap-2">
           <input
@@ -187,7 +199,7 @@ export function FollowTheMoney() {
                   className="w-16 h-16 rounded-lg object-cover bg-vibe-border"
                 />
               )}
-              <div>
+              <div className="flex-1">
                 <h3 className="text-lg font-bold">{selectedMember.name}</h3>
                 <div className="flex items-center gap-2 mt-1">
                   <PartyBadge party={selectedMember.party} />
@@ -202,18 +214,48 @@ export function FollowTheMoney() {
             </div>
 
             {/* FEC linking status */}
-            {link.loading && (
-              <p className="text-xs text-vibe-dim mt-3">Linking to FEC records...</p>
-            )}
-            {link.data && (
-              <p className="text-xs text-vibe-dim mt-3">
-                {link.data.fec_candidates?.length ?? 0} FEC candidate record(s) found
-                {link.data.fec_candidates?.map((fc) => (
-                  <span key={fc.candidate_id} className="ml-2 badge bg-vibe-border text-vibe-text">
-                    {fc.candidate_id}
+            <div className="mt-3 pt-3 border-t border-vibe-border">
+              {link.loading && (
+                <p className="text-xs text-vibe-dim">Linking to FEC records...</p>
+              )}
+              {link.error && (
+                <p className="text-xs text-vibe-nay">FEC link error: {link.error}</p>
+              )}
+              {link.data && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-vibe-dim">
+                    {link.data.fec_candidates?.length ?? 0} FEC candidate record(s) linked
                   </span>
-                ))}
-              </p>
+                  {link.data.fec_candidates?.map((fc) => (
+                    <span key={fc.candidate_id} className="badge bg-vibe-border text-vibe-text text-xs">
+                      {fc.candidate_id} {fc.name ? `(${fc.name})` : ""}
+                    </span>
+                  ))}
+                  {link.data.message && (
+                    <span className="text-xs text-yellow-400">{link.data.message}</span>
+                  )}
+                  {(link.data.fec_candidates?.length ?? 0) === 0 && (
+                    <span className="text-xs text-yellow-400">
+                      No FEC candidate match found — contribution data may be unavailable.
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Debug toggle */}
+            <button
+              onClick={() => setShowDebug((v) => !v)}
+              className="text-xs text-vibe-dim hover:text-vibe-text mt-2 block"
+            >
+              {showDebug ? "Hide" : "Show"} raw API data
+            </button>
+            {showDebug && (
+              <div className="mt-2 space-y-2">
+                <JsonViewer data={correlation.data} label="Correlation API" />
+                <JsonViewer data={link.data} label="FEC Link API" />
+                <JsonViewer data={contributions.data} label="Contributions API" />
+              </div>
             )}
           </div>
 
@@ -225,21 +267,26 @@ export function FollowTheMoney() {
                 Top Donors by Employer
               </h4>
 
-              {correlation.loading && <LoadingSkeleton />}
+              {(correlation.loading || contributions.loading) && <LoadingSkeleton />}
 
               {/* From Supabase correlation data */}
               {correlation.data?.top_donors &&
                 correlation.data.top_donors.length > 0 && (
                   <div className="space-y-1">
+                    <p className="text-xs text-vibe-dim">From contribution records:</p>
                     {correlation.data.top_donors.slice(0, 15).map((d, i) => (
                       <div key={i} className="card py-2 px-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="min-w-0">
                             <p className="text-sm font-medium truncate">
-                              {d.contributor_employer}
+                              {d.contributor_employer || "(Unknown employer)"}
                             </p>
                             <p className="text-xs text-vibe-dim">
-                              {d.contribution_count} contribution(s)
+                              {d.contribution_count} contribution(s) ·{" "}
+                              {d.first_contribution?.slice(0, 4)}
+                              {d.last_contribution && d.last_contribution !== d.first_contribution
+                                ? `–${d.last_contribution?.slice(0, 4)}`
+                                : ""}
                             </p>
                           </div>
                           <p className="text-sm font-bold text-vibe-money shrink-0">
@@ -290,14 +337,22 @@ export function FollowTheMoney() {
               {/* No data state */}
               {!correlation.loading &&
                 !contributions.loading &&
-                (!correlation.data?.top_donors ||
-                  correlation.data.top_donors.length === 0) &&
-                (!contributions.data?.contributions ||
-                  contributions.data.contributions.length === 0) && (
-                  <div className="card">
-                    <p className="text-sm text-vibe-dim">
-                      No contribution data available yet. Data is populated as
-                      users search the FEC contributions tab.
+                !hasAnyDonorData && (
+                  <div className="card bg-vibe-surface">
+                    <p className="text-sm text-vibe-dim mb-2">
+                      No contribution data found.
+                    </p>
+                    <p className="text-xs text-vibe-dim">
+                      This can happen if:
+                    </p>
+                    <ul className="text-xs text-vibe-dim mt-1 space-y-0.5 list-disc list-inside">
+                      <li>No FEC candidate record was matched (see linking status above)</li>
+                      <li>The member hasn't filed recent FEC reports</li>
+                      <li>Contribution data hasn't been indexed yet</li>
+                    </ul>
+                    <p className="text-xs text-vibe-dim mt-2">
+                      Try searching this candidate directly in the{" "}
+                      <span className="text-vibe-money font-medium">Money</span> tab for more options.
                     </p>
                   </div>
                 )}
@@ -311,44 +366,50 @@ export function FollowTheMoney() {
 
               {correlation.loading && <LoadingSkeleton />}
 
-              {correlation.data?.recent_votes &&
-                correlation.data.recent_votes.length > 0 && (
-                  <div className="space-y-1">
-                    {correlation.data.recent_votes.slice(0, 20).map((v, i) => (
-                      <div key={i} className="card py-2 px-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm truncate">
-                              {v.question ?? v.vote_description ?? "Vote"}
+              {hasAnyVoteData && (
+                <div className="space-y-1">
+                  {correlation.data!.recent_votes.slice(0, 20).map((v, i) => (
+                    <div key={i} className="card py-2 px-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm truncate">
+                            {v.question ?? v.vote_description ?? "Vote"}
+                          </p>
+                          {v.vote_description && v.question && (
+                            <p className="text-xs text-vibe-dim truncate">
+                              {v.vote_description}
                             </p>
-                            <p className="text-xs text-vibe-dim">
-                              {v.vote_date} | {v.chamber} RC#{v.roll_call_number}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <PositionBadge position={v.position} />
-                            {v.result && (
-                              <span className="text-xs text-vibe-dim">
-                                {v.result}
-                              </span>
-                            )}
-                          </div>
+                          )}
+                          <p className="text-xs text-vibe-dim">
+                            {v.vote_date} | {v.chamber} RC#{v.roll_call_number}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <PositionBadge position={v.position} />
+                          {v.result && (
+                            <span className="text-xs text-vibe-dim">
+                              {v.result}
+                            </span>
+                          )}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    </div>
+                  ))}
+                </div>
+              )}
 
-              {!correlation.loading &&
-                (!correlation.data?.recent_votes ||
-                  correlation.data.recent_votes.length === 0) && (
-                  <div className="card">
-                    <p className="text-sm text-vibe-dim">
-                      No voting record available yet. Vote data is populated as
-                      users browse the Votes tab.
-                    </p>
-                  </div>
-                )}
+              {!correlation.loading && !hasAnyVoteData && (
+                <div className="card bg-vibe-surface">
+                  <p className="text-sm text-vibe-dim mb-2">
+                    No voting records found yet.
+                  </p>
+                  <p className="text-xs text-vibe-dim">
+                    Vote data is populated when users browse the{" "}
+                    <span className="text-vibe-accent font-medium">Votes</span> tab.
+                    Try browsing the 119th Congress votes there to seed the data.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
