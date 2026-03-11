@@ -101,7 +101,16 @@ export function VoteSearch() {
         </div>
       )}
 
-      {list.data?.votes && (
+      {list.data?.votes && list.data.votes.length === 0 && (
+        <div className="card">
+          <p className="text-sm text-vibe-dim">
+            No roll call votes found for this congress and chamber selection.
+            Try a different congress or chamber.
+          </p>
+        </div>
+      )}
+
+      {list.data?.votes && list.data.votes.length > 0 && (
         <div className="space-y-2">
           {list.data.votes.map((v, i) => (
             <button

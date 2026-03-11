@@ -353,16 +353,25 @@ congress.get("/votes", async (c) => {
       if (data.votes) allVotes = allVotes.concat(data.votes);
     }
 
-    if (allVotes.length === 0 && firstErrorStatus !== null) {
+    if (allVotes.length === 0) {
+      if (firstErrorStatus !== null) {
+        return c.json(
+          {
+            error: `Congress API returned ${firstErrorStatus}`,
+            detail: firstErrorBody.slice(0, 200) || undefined,
+            hint: !hasSupabase(c.env)
+              ? "Supabase is not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY Worker secrets to enable cached data."
+              : undefined,
+          },
+          502
+        );
+      }
+      // API returned 200 but with no vote data — return empty array so
+      // the frontend can show an appropriate "no results" message.
       return c.json(
-        {
-          error: `Congress API returned ${firstErrorStatus}`,
-          detail: firstErrorBody.slice(0, 200) || undefined,
-          hint: !hasSupabase(c.env)
-            ? "Supabase is not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY Worker secrets to enable cached data."
-            : undefined,
-        },
-        502
+        { votes: [], count: 0 },
+        200,
+        { "Cache-Control": "public, max-age=300" }
       );
     }
 
