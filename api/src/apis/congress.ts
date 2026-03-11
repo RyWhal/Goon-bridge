@@ -254,6 +254,25 @@ congress.get("/votes", async (c) => {
   const limit = parseInt(c.req.query("limit") ?? "20", 10);
   const offset = parseInt(c.req.query("offset") ?? "0", 10);
 
+  // Helper to normalize vote rows from Supabase (snake_case) to frontend (camelCase)
+  function normalizeDbVote(row: Record<string, unknown>) {
+    return {
+      congress: row.congress,
+      chamber: row.chamber,
+      rollCallNumber: row.roll_call_number,
+      date: row.date,
+      question: row.question,
+      description: row.description,
+      result: row.result,
+      totalYea: row.total_yea,
+      totalNay: row.total_nay,
+      totalNotVoting: row.total_not_voting,
+      bill: row.bill_congress
+        ? { congress: row.bill_congress, type: row.bill_type, number: row.bill_number }
+        : undefined,
+    };
+  }
+
   // Try Supabase first
   if (hasSupabase(c.env)) {
     try {
@@ -273,7 +292,10 @@ congress.get("/votes", async (c) => {
 
       if (!error && data && data.length > 0) {
         return c.json(
-          { votes: data, count: count ?? data.length },
+          {
+            votes: data.map((row) => normalizeDbVote(row as Record<string, unknown>)),
+            count: count ?? data.length,
+          },
           200,
           { "Cache-Control": "public, max-age=1800" }
         );
@@ -288,22 +310,54 @@ congress.get("/votes", async (c) => {
     offset: offset.toString(),
   };
 
-  let path = `/vote`;
-  if (congress_num) {
-    path = `/vote/${congress_num}`;
-    if (chamber) {
-      path = `/vote/${congress_num}/${chamber}`;
-    }
-  }
+  // Congress.gov API v3 requires both congress AND chamber in the path
+  // to return a vote listing. `/vote/{congress}` alone is not a valid
+  // list endpoint — it returns 404. When no chamber is selected we
+  // request both chambers in parallel and merge.
+  const chambers = chamber ? [chamber] : ["house", "senate"];
+
+  type CongressVote = {
+    congress?: number;
+    chamber?: string;
+    number?: number;
+    date?: string;
+    question?: string;
+    description?: string;
+    result?: string;
+    totalYea?: number;
+    totalNay?: number;
+    totalNotVoting?: number;
+    bill?: { congress?: number; type?: string; number?: number };
+    [key: string]: unknown;
+  };
 
   try {
-    const resp = await congressFetch(path, apiKey, params);
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
+    const responses = await Promise.all(
+      chambers.map((ch) =>
+        congressFetch(`/vote/${congress_num}/${ch}`, apiKey, params)
+      )
+    );
+
+    let allVotes: CongressVote[] = [];
+    let firstErrorStatus: number | null = null;
+    let firstErrorBody = "";
+    for (const resp of responses) {
+      if (!resp.ok) {
+        if (firstErrorStatus === null) {
+          firstErrorStatus = resp.status;
+          firstErrorBody = await resp.text().catch(() => "");
+        }
+        continue;
+      }
+      const data = (await resp.json()) as { votes?: CongressVote[] };
+      if (data.votes) allVotes = allVotes.concat(data.votes);
+    }
+
+    if (allVotes.length === 0 && firstErrorStatus !== null) {
       return c.json(
         {
-          error: `Congress API returned ${resp.status}`,
-          detail: body.slice(0, 200) || undefined,
+          error: `Congress API returned ${firstErrorStatus}`,
+          detail: firstErrorBody.slice(0, 200) || undefined,
           hint: !hasSupabase(c.env)
             ? "Supabase is not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY Worker secrets to enable cached data."
             : undefined,
@@ -311,27 +365,21 @@ congress.get("/votes", async (c) => {
         502
       );
     }
-    const data = (await resp.json()) as {
-      votes?: Array<{
-        congress?: number;
-        chamber?: string;
-        number?: number;
-        date?: string;
-        question?: string;
-        description?: string;
-        result?: string;
-        totalYea?: number;
-        totalNay?: number;
-        totalNotVoting?: number;
-        bill?: { congress?: number; type?: string; number?: number };
-        [key: string]: unknown;
-      }>;
-    };
+
+    // Sort merged results by date descending and trim to requested limit
+    allVotes.sort((a, b) => {
+      const da = a.date ?? "";
+      const db = b.date ?? "";
+      return db.localeCompare(da);
+    });
+    if (!chamber) {
+      allVotes = allVotes.slice(0, limit);
+    }
 
     // Cache votes to Supabase in the background
-    if (hasSupabase(c.env) && data.votes?.length) {
+    if (hasSupabase(c.env) && allVotes.length) {
       const sb = getSupabase(c.env);
-      const rows = data.votes
+      const rows = allVotes
         .filter((v) => v.congress && v.chamber && v.number)
         .map((v) => ({
           congress: v.congress!,
@@ -355,7 +403,13 @@ congress.get("/votes", async (c) => {
       );
     }
 
-    return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
+    // Normalize the response: Congress.gov uses `number` but frontend expects `rollCallNumber`
+    const normalized = allVotes.map((v) => ({
+      ...v,
+      rollCallNumber: v.number,
+    }));
+
+    return c.json({ votes: normalized }, 200, { "Cache-Control": "public, max-age=1800" });
   } catch (e) {
     return c.json(
       {

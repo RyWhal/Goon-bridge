@@ -15,19 +15,32 @@ export const onRequest: PagesFunction = async (context) => {
   // Remove host so the Worker sees its own host
   headers.delete("host");
 
-  const resp = await fetch(target.toString(), {
-    method: context.request.method,
-    headers,
-    body:
-      context.request.method !== "GET" && context.request.method !== "HEAD"
-        ? context.request.body
-        : undefined,
-  });
+  try {
+    const resp = await fetch(target.toString(), {
+      method: context.request.method,
+      headers,
+      body:
+        context.request.method !== "GET" && context.request.method !== "HEAD"
+          ? context.request.body
+          : undefined,
+    });
 
-  // Return the Worker's response directly
-  return new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: resp.headers,
-  });
+    // Return the Worker's response directly
+    return new Response(resp.body, {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: resp.headers,
+    });
+  } catch (e) {
+    return new Response(
+      JSON.stringify({
+        error: "Unable to reach API worker",
+        detail: e instanceof Error ? e.message : "Network error",
+      }),
+      {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
 };
