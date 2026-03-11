@@ -17,7 +17,7 @@ invocation_logs = true
 [vars]
 ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space,http://localhost:5175,http://localhost:5173"
-SUPABASE_URL = "https://iqedxqqiinfokrbcaqsk.supabase.co"
+SUPABASE_URL = "https://phorzmybynuuxbvcioqg.supabase.co"
 
 # Uncomment when custom domain is configured in Cloudflare DNS:
 # [[routes]]
