@@ -24,13 +24,6 @@ app.get("/api/health", async (c) => {
   const hasSupabaseConfig = !!(c.env.SUPABASE_URL && c.env.SUPABASE_SERVICE_KEY);
   let supabaseStatus: boolean | string = false;
 
-  // Debug: inspect key shape (masked)
-  const keyRaw = c.env.SUPABASE_SERVICE_KEY ?? "";
-  const keyLen = keyRaw.length;
-  const keyPreview = keyLen > 8
-    ? `${keyRaw.slice(0, 4)}...${keyRaw.slice(-4)} (len=${keyLen})`
-    : `(len=${keyLen})`;
-
   if (!hasSupabaseConfig) {
     supabaseStatus = false;
   } else {
@@ -62,8 +55,6 @@ app.get("/api/health", async (c) => {
       lunar: true,
     },
     supabase_configured: hasSupabaseConfig,
-    _debug_key_shape: keyPreview,
-    _debug_url: c.env.SUPABASE_URL ?? "(missing)",
   });
 });
 
