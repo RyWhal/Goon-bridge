@@ -21,7 +21,7 @@ app.use("/api/*", rateLimitMiddleware);
 app.get("/api/health", (c) => {
   return c.json({
     status: "ok",
-    service: "congress-vibe-check-api",
+    service: "vibe-api",
     timestamp: new Date().toISOString(),
     environment: c.env.ENVIRONMENT ?? "unknown",
     apis: {
