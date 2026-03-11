@@ -33,10 +33,10 @@ app.get("/api/health", async (c) => {
       const { error } = await sb.from("members").select("bioguide_id").limit(1);
       supabaseStatus = !error;
       if (error) {
-        supabaseStatus = false;
+        supabaseStatus = `error: ${error.message} (code: ${error.code})`;
       }
-    } catch {
-      supabaseStatus = false;
+    } catch (e: unknown) {
+      supabaseStatus = `exception: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
