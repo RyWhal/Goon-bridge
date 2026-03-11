@@ -10,35 +10,15 @@ enabled = true
 enabled = true
 invocation_logs = true
 
-# ── Development defaults ──────────────────────────────────────────────────────
+# ── Variables ─────────────────────────────────────────────────────────────────
+# Production vars — secrets (CONGRESS_API_KEY, OPENFEC_API_KEY, SUPABASE_URL,
+# SUPABASE_SERVICE_KEY) are set in the Cloudflare dashboard under
+# Workers → vibe-api → Settings → Variables and Secrets.
 [vars]
-ENVIRONMENT = "development"
-ALLOWED_ORIGINS = "http://localhost:5175,http://localhost:5173"
-# CONGRESS_API_KEY, OPENFEC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
-# → set via `wrangler secret put` or .dev.vars
-
-# ── Production environment ────────────────────────────────────────────────────
-[env.production]
-name = "vibe-api"
-
-[env.production.vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space"
-# Secrets set via:
-#   wrangler secret put CONGRESS_API_KEY --env production
-#   wrangler secret put OPENFEC_API_KEY --env production
-#   wrangler secret put SUPABASE_URL --env production
-#   wrangler secret put SUPABASE_SERVICE_KEY --env production
+ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space,http://localhost:5175,http://localhost:5173"
 
 # Uncomment when custom domain is configured in Cloudflare DNS:
-# [[env.production.routes]]
+# [[routes]]
 # pattern = "congressional-vibes.rjpw.space/api/*"
 # zone_name = "rjpw.space"
-
-# ── Staging environment ──────────────────────────────────────────────────────
-[env.staging]
-name = "vibe-api-staging"
-
-[env.staging.vars]
-ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://staging.congressional-vibes.rjpw.space"
