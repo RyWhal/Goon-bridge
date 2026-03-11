@@ -163,6 +163,12 @@ export function MemberSearch() {
               </p>
             </div>
           </div>
+          <div className="mt-3 pt-3 border-t border-vibe-border">
+            <p className="text-xs text-vibe-dim">
+              Want to see this member's donors and votes side-by-side? Check the{" "}
+              <span className="text-vibe-money font-medium">Follow the Money</span> tab.
+            </p>
+          </div>
           <JsonViewer data={detail.data} label="Full API Response" />
         </div>
       )}

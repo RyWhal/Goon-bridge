@@ -4,6 +4,9 @@
 -- Run this in the Supabase SQL Editor to create all tables.
 -- ============================================================================
 
+-- Enable trigram extension for fuzzy name search (must come before indexes that use it)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- 1. Members of Congress (source: Congress.gov)
 CREATE TABLE members (
   bioguide_id TEXT PRIMARY KEY,
@@ -20,9 +23,6 @@ CREATE TABLE members (
 CREATE INDEX idx_members_state ON members(state);
 CREATE INDEX idx_members_party ON members(party);
 CREATE INDEX idx_members_name_trgm ON members USING gin (name gin_trgm_ops);
-
--- Enable trigram extension for fuzzy name search
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- 2. Roll call votes (source: Congress.gov)
 CREATE TABLE votes (
