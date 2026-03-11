@@ -22,12 +22,12 @@ name = "congress-vibe-check-api"
 
 [env.production.vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "https://vibe.rjpw.space"
+ALLOWED_ORIGINS = "https://congressional-vibes.rjpw.space"
 # Secrets set via: wrangler secret put CONGRESS_API_KEY --env production
 
 # Uncomment when domain is configured:
 # [[env.production.routes]]
-# pattern = "vibe.rjpw.space/api/*"
+# pattern = "congressional-vibes.rjpw.space/api/*"
 # zone_name = "rjpw.space"
 
 # ── Staging environment ──────────────────────────────────────────────────────
@@ -36,4 +36,4 @@ name = "congress-vibe-check-api-staging"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://staging.vibe.rjpw.space"
+ALLOWED_ORIGINS = "https://staging.congressional-vibes.rjpw.space"
