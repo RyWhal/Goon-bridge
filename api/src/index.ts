@@ -10,6 +10,7 @@ import { earthquakes } from "./apis/earthquakes";
 import { sunrise } from "./apis/sunrise";
 import { lunar } from "./apis/lunar";
 import { correlation } from "./apis/correlation";
+import { getSupabase } from "./lib/supabase";
 
 const app = new Hono<Env>();
 
@@ -19,7 +20,26 @@ app.use("/api/*", corsMiddleware);
 app.use("/api/*", rateLimitMiddleware);
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get("/api/health", (c) => {
+app.get("/api/health", async (c) => {
+  const hasSupabaseConfig = !!(c.env.SUPABASE_URL && c.env.SUPABASE_SERVICE_KEY);
+  let supabaseStatus: boolean | string = false;
+
+  if (!hasSupabaseConfig) {
+    supabaseStatus = false;
+  } else {
+    // Actually test the connection with a lightweight query
+    try {
+      const sb = getSupabase(c.env);
+      const { error } = await sb.from("members").select("bioguide_id").limit(1);
+      supabaseStatus = !error;
+      if (error) {
+        supabaseStatus = false;
+      }
+    } catch {
+      supabaseStatus = false;
+    }
+  }
+
   return c.json({
     status: "ok",
     service: "vibe-api",
@@ -28,12 +48,13 @@ app.get("/api/health", (c) => {
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,
-      supabase: !!(c.env.SUPABASE_URL && c.env.SUPABASE_SERVICE_KEY),
+      supabase: supabaseStatus,
       weather: true,
       earthquakes: true,
       sunrise: true,
       lunar: true,
     },
+    supabase_configured: hasSupabaseConfig,
   });
 });
 

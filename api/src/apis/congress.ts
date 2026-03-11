@@ -299,7 +299,17 @@ congress.get("/votes", async (c) => {
   try {
     const resp = await congressFetch(path, apiKey, params);
     if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
+      const body = await resp.text().catch(() => "");
+      return c.json(
+        {
+          error: `Congress API returned ${resp.status}`,
+          detail: body.slice(0, 200) || undefined,
+          hint: !hasSupabase(c.env)
+            ? "Supabase is not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY Worker secrets to enable cached data."
+            : undefined,
+        },
+        502
+      );
     }
     const data = (await resp.json()) as {
       votes?: Array<{
@@ -346,8 +356,17 @@ congress.get("/votes", async (c) => {
     }
 
     return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
-  } catch {
-    return c.json({ error: "Failed to fetch from Congress API" }, 502);
+  } catch (e) {
+    return c.json(
+      {
+        error: "Failed to fetch from Congress API",
+        detail: e instanceof Error ? e.message : undefined,
+        hint: !hasSupabase(c.env)
+          ? "Supabase is not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY Worker secrets to enable cached data."
+          : undefined,
+      },
+      502
+    );
   }
 });
 
