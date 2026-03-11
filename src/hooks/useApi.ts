@@ -40,7 +40,20 @@ export function useApi<T>() {
         setState({ data: null, loading: false, error: errorMsg });
         return;
       }
-      const data = (await resp.json()) as T;
+      const data = (await resp.json()) as T & { error?: string; detail?: string };
+
+      // The proxy returns 200 even for upstream errors (to prevent
+      // Cloudflare from replacing the body with an HTML error page).
+      // Detect these by checking for an `error` field.
+      if (data && typeof data === "object" && data.error) {
+        setState({
+          data: null,
+          loading: false,
+          error: data.detail ? `${data.error}: ${data.detail}` : data.error,
+        });
+        return;
+      }
+
       setState({ data, loading: false, error: null });
     } catch (e) {
       setState({
