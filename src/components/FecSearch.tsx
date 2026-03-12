@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 
@@ -38,6 +38,7 @@ interface ContributionSearchResponse {
 }
 
 type SearchMode = "candidates" | "contributions";
+type DonationSort = "high_to_low" | "low_to_high";
 
 const ELECTION_YEARS = ["2024", "2022", "2020", "2018", "2016"];
 const OFFICE_OPTIONS = [
@@ -57,6 +58,9 @@ export function FecSearch() {
   const [state, setState] = useState("");
   const [electionYear, setElectionYear] = useState("");
   const [officeFilter, setOfficeFilter] = useState("");
+  const [contributionsSort, setContributionsSort] = useState<DonationSort>("high_to_low");
+  const [candidateContributionsSort, setCandidateContributionsSort] =
+    useState<DonationSort>("high_to_low");
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
@@ -89,6 +93,44 @@ export function FecSearch() {
       candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
     }
   };
+
+  const sortedContributionResults = useMemo(() => {
+    const rows = contributions.data?.results ?? [];
+    return [...rows].sort((a, b) => {
+      const aAmount = a.contribution_receipt_amount ?? 0;
+      const bAmount = b.contribution_receipt_amount ?? 0;
+      return contributionsSort === "high_to_low" ? bAmount - aAmount : aAmount - bAmount;
+    });
+  }, [contributions.data?.results, contributionsSort]);
+
+  const sortedCandidateContributionResults = useMemo(() => {
+    const rows = candidateContributions.data?.results ?? [];
+    return [...rows].sort((a, b) => {
+      const aAmount = a.contribution_receipt_amount ?? 0;
+      const bAmount = b.contribution_receipt_amount ?? 0;
+      return candidateContributionsSort === "high_to_low"
+        ? bAmount - aAmount
+        : aAmount - bAmount;
+    });
+  }, [candidateContributions.data?.results, candidateContributionsSort]);
+
+  const contributionsAverage = useMemo(() => {
+    if (!sortedContributionResults.length) return null;
+    const sum = sortedContributionResults.reduce(
+      (acc, row) => acc + (row.contribution_receipt_amount ?? 0),
+      0
+    );
+    return sum / sortedContributionResults.length;
+  }, [sortedContributionResults]);
+
+  const candidateContributionsAverage = useMemo(() => {
+    if (!sortedCandidateContributionResults.length) return null;
+    const sum = sortedCandidateContributionResults.reduce(
+      (acc, row) => acc + (row.contribution_receipt_amount ?? 0),
+      0
+    );
+    return sum / sortedCandidateContributionResults.length;
+  }, [sortedCandidateContributionResults]);
 
   return (
     <div className="space-y-4">
@@ -301,11 +343,28 @@ export function FecSearch() {
             {candidateContributions.data?.results &&
               candidateContributions.data.results.length > 0 && (
                 <div className="space-y-1">
-                  <p className="text-xs text-vibe-dim mb-2">
-                    Showing {candidateContributions.data.results.length} of{" "}
-                    {candidateContributions.data.pagination?.count ?? "?"}
-                  </p>
-                  {candidateContributions.data.results.map((c, i) => (
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <p className="text-xs text-vibe-dim">
+                      Showing {candidateContributions.data.results.length} of{" "}
+                      {candidateContributions.data.pagination?.count ?? "?"} · Avg donation:{" "}
+                      <span className="text-vibe-money font-medium">
+                        ${candidateContributionsAverage?.toLocaleString(undefined, {
+                          maximumFractionDigits: 2,
+                        }) ?? "0"}
+                      </span>
+                    </p>
+                    <select
+                      className="select text-xs py-1"
+                      value={candidateContributionsSort}
+                      onChange={(e) =>
+                        setCandidateContributionsSort(e.target.value as DonationSort)
+                      }
+                    >
+                      <option value="high_to_low">Amount: High → Low</option>
+                      <option value="low_to_high">Amount: Low → High</option>
+                    </select>
+                  </div>
+                  {sortedCandidateContributionResults.map((c, i) => (
                     <div key={i} className="flex items-start justify-between gap-4 px-3 py-2 bg-vibe-surface rounded">
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium truncate">{c.contributor_name}</p>
@@ -355,11 +414,26 @@ export function FecSearch() {
       )}
       {mode === "contributions" && contributions.data?.results && (
         <div className="space-y-2">
-          <p className="text-xs text-vibe-dim">
-            {contributions.data.pagination?.count ?? contributions.data.results.length}{" "}
-            total results
-          </p>
-          {contributions.data.results.map((c, i) => (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-vibe-dim">
+              {contributions.data.pagination?.count ?? contributions.data.results.length}{" "}
+              total results · Avg donation:{" "}
+              <span className="text-vibe-money font-medium">
+                ${contributionsAverage?.toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                }) ?? "0"}
+              </span>
+            </p>
+            <select
+              className="select text-xs py-1"
+              value={contributionsSort}
+              onChange={(e) => setContributionsSort(e.target.value as DonationSort)}
+            >
+              <option value="high_to_low">Amount: High → Low</option>
+              <option value="low_to_high">Amount: Low → High</option>
+            </select>
+          </div>
+          {sortedContributionResults.map((c, i) => (
             <div key={i} className="card">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
