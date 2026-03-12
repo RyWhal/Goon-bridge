@@ -82,7 +82,7 @@ export function FecSearch() {
 
   const searchContributions = () => {
     const params = new URLSearchParams({
-      limit: "20",
+      limit: "100",
       sort: toApiAmountSort(contributionsSort),
     });
     if (employer) params.set("employer", employer);
@@ -100,7 +100,7 @@ export function FecSearch() {
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
     const params = new URLSearchParams({
-      limit: "20",
+      limit: "100",
       candidate_id: selectedCandidate.candidate_id,
       sort: toApiAmountSort(candidateContributionsSort),
     });

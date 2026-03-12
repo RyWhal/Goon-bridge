@@ -218,11 +218,21 @@ openfec.get("/contributions", async (c) => {
     is_individual: "true",
   };
 
-  let endpoint = "/schedules/schedule_a/";
+  const endpoint = "/schedules/schedule_a/";
 
   const candidateId = c.req.query("candidate_id");
   if (candidateId) {
-    endpoint = "/schedules/schedule_a/by_candidate/";
+    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
+    if (!committeeIdForCandidate) {
+      return c.json(
+        {
+          error: `No authorized committee found for candidate ${candidateId}`,
+          query: { candidate_id: candidateId },
+        },
+        404
+      );
+    }
+    params["committee_id"] = committeeIdForCandidate;
     params["candidate_id"] = candidateId;
   }
 
