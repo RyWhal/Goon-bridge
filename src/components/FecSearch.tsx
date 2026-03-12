@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 
@@ -40,6 +40,10 @@ interface ContributionSearchResponse {
 type SearchMode = "candidates" | "contributions";
 type DonationSort = "high_to_low" | "low_to_high";
 
+function toApiAmountSort(sort: DonationSort): string {
+  return sort === "high_to_low" ? "amount_desc" : "amount_asc";
+}
+
 const ELECTION_YEARS = ["2024", "2022", "2020", "2018", "2016"];
 const OFFICE_OPTIONS = [
   { value: "", label: "All Offices" },
@@ -47,6 +51,8 @@ const OFFICE_OPTIONS = [
   { value: "S", label: "Senate" },
   { value: "P", label: "President" },
 ];
+
+const PAGE_SIZE = 50;
 
 export function FecSearch() {
   const [mode, setMode] = useState<SearchMode>("candidates");
@@ -62,6 +68,8 @@ export function FecSearch() {
   const [candidateContributionsSort, setCandidateContributionsSort] =
     useState<DonationSort>("high_to_low");
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
+  const [contributionsPage, setContributionsPage] = useState(1);
+  const [candidateContributionsPage, setCandidateContributionsPage] = useState(1);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
   const candidateContributions = useApi<ContributionSearchResponse>();
@@ -76,8 +84,13 @@ export function FecSearch() {
     setSelectedCandidate(null);
   };
 
-  const searchContributions = () => {
-    const params = new URLSearchParams({ limit: "20" });
+  const fetchContributionsPage = (page: number) => {
+    setContributionsPage(page);
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      page: String(page),
+      sort: toApiAmountSort(contributionsSort),
+    });
     if (employer) params.set("employer", employer);
     if (contributorName) params.set("contributor_name", contributorName);
     if (minAmount) params.set("min_amount", minAmount);
@@ -86,13 +99,32 @@ export function FecSearch() {
     contributions.fetchData(`/api/fec/contributions?${params.toString()}`);
   };
 
+  const searchContributions = () => {
+    fetchContributionsPage(1);
+  };
+
   const handleCandidateClick = (c: CandidateResult) => {
     setSelectedCandidate(c);
-    if (c.candidate_id) {
-      const params = new URLSearchParams({ limit: "20", candidate_id: c.candidate_id });
-      candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
-    }
+    setCandidateContributionsPage(1);
   };
+
+  useEffect(() => {
+    if (!selectedCandidate?.candidate_id) return;
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      page: String(candidateContributionsPage),
+      candidate_id: selectedCandidate.candidate_id,
+      sort: toApiAmountSort(candidateContributionsSort),
+    });
+    candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
+  }, [candidateContributionsPage, candidateContributionsSort, selectedCandidate?.candidate_id]);
+
+  useEffect(() => {
+    if (mode !== "contributions") return;
+    if (!contributions.data?.results) return;
+    fetchContributionsPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contributionsSort]);
 
   const sortedContributionResults = useMemo(() => {
     const rows = contributions.data?.results ?? [];
@@ -142,13 +174,13 @@ export function FecSearch() {
         {/* Mode toggle */}
         <div className="flex gap-2 mb-3">
           <button
-            onClick={() => { setMode("candidates"); setSelectedCandidate(null); }}
+            onClick={() => { setMode("candidates"); setSelectedCandidate(null); setCandidateContributionsPage(1); }}
             className={`btn ${mode === "candidates" ? "btn-primary" : "btn-ghost"}`}
           >
             Candidates
           </button>
           <button
-            onClick={() => setMode("contributions")}
+            onClick={() => { setMode("contributions"); setContributionsPage(1); }}
             className={`btn ${mode === "contributions" ? "btn-primary" : "btn-ghost"}`}
           >
             Contributions
@@ -364,6 +396,11 @@ export function FecSearch() {
                       <option value="low_to_high">Amount: Low → High</option>
                     </select>
                   </div>
+                  <PaginationControls
+                    page={candidateContributions.data.pagination?.page ?? candidateContributionsPage}
+                    pages={candidateContributions.data.pagination?.pages ?? 1}
+                    onPageChange={setCandidateContributionsPage}
+                  />
                   {sortedCandidateContributionResults.map((c, i) => (
                     <div key={i} className="flex items-start justify-between gap-4 px-3 py-2 bg-vibe-surface rounded">
                       <div className="min-w-0 flex-1">
@@ -433,6 +470,11 @@ export function FecSearch() {
               <option value="low_to_high">Amount: Low → High</option>
             </select>
           </div>
+          <PaginationControls
+            page={contributions.data.pagination?.page ?? contributionsPage}
+            pages={contributions.data.pagination?.pages ?? 1}
+            onPageChange={fetchContributionsPage}
+          />
           {sortedContributionResults.map((c, i) => (
             <div key={i} className="card">
               <div className="flex items-start justify-between gap-4">
@@ -466,6 +508,40 @@ export function FecSearch() {
           <JsonViewer data={contributions.data} label="Full API Response" />
         </div>
       )}
+    </div>
+  );
+}
+
+function PaginationControls({
+  page,
+  pages,
+  onPageChange,
+}: {
+  page: number;
+  pages: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (!pages || pages <= 1) return null;
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        className="btn btn-ghost text-xs"
+        disabled={page <= 1}
+        onClick={() => onPageChange(page - 1)}
+      >
+        ← Prev
+      </button>
+      <p className="text-xs text-vibe-dim">
+        Page {page} of {pages}
+      </p>
+      <button
+        className="btn btn-ghost text-xs"
+        disabled={page >= pages}
+        onClick={() => onPageChange(page + 1)}
+      >
+        Next →
+      </button>
     </div>
   );
 }
