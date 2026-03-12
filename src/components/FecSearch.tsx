@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 
@@ -113,6 +113,8 @@ const OFFICE_OPTIONS = [
 ];
 
 const PAGE_SIZE = 20;
+const SUMMARY_POLL_INTERVAL_MS = 3000;
+const SUMMARY_MAX_POLL_ATTEMPTS = 40;
 
 function cursorFromLastIndexes(
   lastIndexes?: Record<string, string | number>
@@ -149,9 +151,20 @@ export function FecSearch() {
   const [contributionsCursors, setContributionsCursors] = useState<Record<number, ContributionCursor | null>>({
     1: null,
   });
+  const [summaryPollAttempts, setSummaryPollAttempts] = useState(0);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
   const candidateSummary = useApi<CandidateContributionSummaryResponse>();
+
+  const fetchCandidateSummary = useCallback(
+    (candidateId: string, topN: 5 | 10 | 20) => {
+      const params = new URLSearchParams({ top_n: String(topN) });
+      candidateSummary.fetchData(
+        `/api/fec/candidates/${candidateId}/summary?${params.toString()}`
+      );
+    },
+    [candidateSummary.fetchData]
+  );
 
   const searchCandidates = () => {
     const params = new URLSearchParams({ limit: "20" });
@@ -208,15 +221,37 @@ export function FecSearch() {
   const handleCandidateClick = (c: CandidateResult) => {
     setSelectedCandidate(c);
     setCandidateTopN(10);
+    setSummaryPollAttempts(0);
   };
 
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
-    const params = new URLSearchParams({ top_n: String(candidateTopN) });
-    candidateSummary.fetchData(
-      `/api/fec/candidates/${selectedCandidate.candidate_id}/summary?${params.toString()}`
-    );
-  }, [candidateTopN, selectedCandidate?.candidate_id]);
+    setSummaryPollAttempts(0);
+    fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN);
+  }, [candidateTopN, selectedCandidate?.candidate_id, fetchCandidateSummary]);
+
+  useEffect(() => {
+    if (!selectedCandidate?.candidate_id) return;
+    if (candidateSummary.loading) return;
+    if (candidateSummary.error) return;
+    if (!candidateSummary.data?.summary_pending) return;
+    if (summaryPollAttempts >= SUMMARY_MAX_POLL_ATTEMPTS) return;
+
+    const timer = setTimeout(() => {
+      fetchCandidateSummary(selectedCandidate.candidate_id!, candidateTopN);
+      setSummaryPollAttempts((n) => n + 1);
+    }, SUMMARY_POLL_INTERVAL_MS);
+
+    return () => clearTimeout(timer);
+  }, [
+    candidateSummary.data?.summary_pending,
+    candidateSummary.error,
+    candidateSummary.loading,
+    candidateTopN,
+    fetchCandidateSummary,
+    selectedCandidate?.candidate_id,
+    summaryPollAttempts,
+  ]);
 
   useEffect(() => {
     if (mode !== "contributions") return;

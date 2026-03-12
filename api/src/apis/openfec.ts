@@ -286,6 +286,7 @@ async function refreshCandidateContributionsCache(
     refreshPage += 1
   ) {
     const refreshParams: Record<string, string> = {
+      candidate_id: candidateId,
       per_page: String(CANDIDATE_REFRESH_PER_PAGE),
       is_individual: "true",
       two_year_transaction_period: twoYearPeriod,
@@ -293,8 +294,6 @@ async function refreshCandidateContributionsCache(
 
     if (committeeId) {
       refreshParams["committee_id"] = committeeId;
-    } else {
-      refreshParams["candidate_id"] = candidateId;
     }
 
     if (cursor) {
@@ -320,12 +319,29 @@ async function refreshCandidateContributionsCache(
         ...refreshParams,
         per_page: "10",
       };
-      refreshResp = await fecFetch(
-        "/schedules/schedule_a/",
-        apiKey,
-        smallerPageParams,
-        FEC_BACKGROUND_FETCH_TIMEOUT_MS
-      );
+      try {
+        refreshResp = await fecFetch(
+          "/schedules/schedule_a/",
+          apiKey,
+          smallerPageParams,
+          FEC_BACKGROUND_FETCH_TIMEOUT_MS
+        );
+      } catch (retryError) {
+        if (!(retryError instanceof FecTimeoutError)) {
+          throw retryError;
+        }
+
+        const tinyPageParams = {
+          ...refreshParams,
+          per_page: "1",
+        };
+        refreshResp = await fecFetch(
+          "/schedules/schedule_a/",
+          apiKey,
+          tinyPageParams,
+          FEC_BACKGROUND_FETCH_TIMEOUT_MS
+        );
+      }
     }
 
     if (!refreshResp.ok) {
