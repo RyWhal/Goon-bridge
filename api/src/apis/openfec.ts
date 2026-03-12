@@ -202,21 +202,28 @@ openfec.get("/contributions", async (c) => {
   const apiKey = c.env.OPENFEC_API_KEY;
   if (!apiKey) return c.json({ error: "OpenFEC API key not configured" }, 500);
 
+  const sortQuery = c.req.query("sort");
+  const sort = sortQuery === "amount_asc"
+    ? "contribution_receipt_amount"
+    : sortQuery === "amount_desc"
+      ? "-contribution_receipt_amount"
+      : sortQuery === "date_asc"
+        ? "contribution_receipt_date"
+        : "-contribution_receipt_date";
+
   const params: Record<string, string> = {
     per_page: c.req.query("limit") ?? "20",
     page: c.req.query("page") ?? "1",
-    sort: "-contribution_receipt_date",
+    sort,
     is_individual: "true",
   };
 
+  let endpoint = "/schedules/schedule_a/";
+
   const candidateId = c.req.query("candidate_id");
   if (candidateId) {
-    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
-    if (committeeIdForCandidate) {
-      params["committee_id"] = committeeIdForCandidate;
-    } else {
-      params["candidate_id"] = candidateId;
-    }
+    endpoint = "/schedules/schedule_a/by_candidate/";
+    params["candidate_id"] = candidateId;
   }
 
   const committeeId = c.req.query("committee_id");
@@ -247,7 +254,7 @@ openfec.get("/contributions", async (c) => {
   if (state) params["contributor_state"] = state;
 
   try {
-    const resp = await fecFetch("/schedules/schedule_a/", apiKey, params);
+    const resp = await fecFetch(endpoint, apiKey, params);
     if (!resp.ok) {
       const upstreamDetail = await readFecErrorDetails(resp);
       const debugParams = Object.fromEntries(

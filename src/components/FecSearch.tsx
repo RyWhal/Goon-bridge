@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 
@@ -40,6 +40,10 @@ interface ContributionSearchResponse {
 type SearchMode = "candidates" | "contributions";
 type DonationSort = "high_to_low" | "low_to_high";
 
+function toApiAmountSort(sort: DonationSort): string {
+  return sort === "high_to_low" ? "amount_desc" : "amount_asc";
+}
+
 const ELECTION_YEARS = ["2024", "2022", "2020", "2018", "2016"];
 const OFFICE_OPTIONS = [
   { value: "", label: "All Offices" },
@@ -77,7 +81,10 @@ export function FecSearch() {
   };
 
   const searchContributions = () => {
-    const params = new URLSearchParams({ limit: "20" });
+    const params = new URLSearchParams({
+      limit: "20",
+      sort: toApiAmountSort(contributionsSort),
+    });
     if (employer) params.set("employer", employer);
     if (contributorName) params.set("contributor_name", contributorName);
     if (minAmount) params.set("min_amount", minAmount);
@@ -88,11 +95,24 @@ export function FecSearch() {
 
   const handleCandidateClick = (c: CandidateResult) => {
     setSelectedCandidate(c);
-    if (c.candidate_id) {
-      const params = new URLSearchParams({ limit: "20", candidate_id: c.candidate_id });
-      candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
-    }
   };
+
+  useEffect(() => {
+    if (!selectedCandidate?.candidate_id) return;
+    const params = new URLSearchParams({
+      limit: "20",
+      candidate_id: selectedCandidate.candidate_id,
+      sort: toApiAmountSort(candidateContributionsSort),
+    });
+    candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
+  }, [candidateContributionsSort, selectedCandidate?.candidate_id]);
+
+  useEffect(() => {
+    if (mode !== "contributions") return;
+    if (!contributions.data?.results) return;
+    searchContributions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contributionsSort]);
 
   const sortedContributionResults = useMemo(() => {
     const rows = contributions.data?.results ?? [];
