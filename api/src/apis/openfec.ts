@@ -8,10 +8,6 @@ const BASE = "https://api.open.fec.gov/v1";
 const FEC_FETCH_TIMEOUT_MS = 12_000;
 const FEC_BACKGROUND_FETCH_TIMEOUT_MS = 30_000;
 const CONTRIBUTIONS_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
-const CANDIDATE_REFRESH_PER_PAGE = 25;
-const CANDIDATE_REFRESH_MAX_PAGES = 100;
-const SUMMARY_REFRESH_DEBOUNCE_MS = 2 * 60 * 1000;
-const summaryRefreshLocks = new Map<string, number>();
 
 class FecTimeoutError extends Error {
   constructor(message = "OpenFEC request timed out") {
@@ -51,14 +47,6 @@ interface FecScheduleAPagination {
   page?: number;
   pages?: number;
   last_indexes?: Record<string, string | number>;
-}
-
-interface CachedContributionSummaryRow {
-  contributor_name: string | null;
-  contributor_employer: string | null;
-  contribution_amount: number | null;
-  contribution_date: string | null;
-  committee_name: string | null;
 }
 
 function hasSupabase(env: Env["Bindings"]): boolean {
@@ -209,40 +197,6 @@ function mapFecRowsToCacheRows(
   }));
 }
 
-function mapScheduleALastIndexesToCursor(
-  lastIndexes?: Record<string, string | number>
-): Record<string, string> | null {
-  if (!lastIndexes) return null;
-
-  const cursor: Record<string, string> = {};
-  if (lastIndexes.last_index != null) {
-    cursor["last_index"] = String(lastIndexes.last_index);
-  }
-  if (lastIndexes.last_contribution_receipt_amount != null) {
-    cursor["last_contribution_receipt_amount"] = String(lastIndexes.last_contribution_receipt_amount);
-  }
-  if (lastIndexes.last_contribution_receipt_date != null) {
-    cursor["last_contribution_receipt_date"] = String(lastIndexes.last_contribution_receipt_date);
-  }
-  if (lastIndexes.sort_null_only != null) {
-    cursor["sort_null_only"] = String(lastIndexes.sort_null_only);
-  }
-
-  return Object.keys(cursor).length ? cursor : null;
-}
-
-function tryAcquireSummaryRefreshLock(candidateId: string): boolean {
-  const now = Date.now();
-  const existingUntil = summaryRefreshLocks.get(candidateId) ?? 0;
-  if (existingUntil > now) return false;
-  summaryRefreshLocks.set(candidateId, now + SUMMARY_REFRESH_DEBOUNCE_MS);
-  return true;
-}
-
-function releaseSummaryRefreshLock(candidateId: string): void {
-  summaryRefreshLocks.delete(candidateId);
-}
-
 function mapCachedRowsToApiRows(rows: Array<{
   candidate_id: string | null;
   committee_id: string | null;
@@ -267,163 +221,6 @@ function mapCachedRowsToApiRows(rows: Array<{
     contribution_receipt_date: r.contribution_date ?? undefined,
     two_year_transaction_period: r.two_year_period ?? undefined,
   }));
-}
-
-async function refreshCandidateContributionsCache(
-  sb: ReturnType<typeof getSupabase>,
-  apiKey: string,
-  candidateId: string,
-  committeeId: string | null,
-  twoYearPeriod: string
-): Promise<number> {
-  const allRows: CachedContributionRow[] = [];
-  let cursor: Record<string, string> | null = null;
-  let lastCursorSignature: string | null = null;
-
-  for (
-    let refreshPage = 1;
-    refreshPage <= CANDIDATE_REFRESH_MAX_PAGES;
-    refreshPage += 1
-  ) {
-    const refreshParams: Record<string, string> = {
-      candidate_id: candidateId,
-      per_page: String(CANDIDATE_REFRESH_PER_PAGE),
-      is_individual: "true",
-      two_year_transaction_period: twoYearPeriod,
-    };
-
-    if (committeeId) {
-      refreshParams["committee_id"] = committeeId;
-    }
-
-    if (cursor) {
-      for (const [key, value] of Object.entries(cursor)) {
-        refreshParams[key] = value;
-      }
-    }
-
-    let refreshResp: Response;
-    try {
-      refreshResp = await fecFetch(
-        "/schedules/schedule_a/",
-        apiKey,
-        refreshParams,
-        FEC_BACKGROUND_FETCH_TIMEOUT_MS
-      );
-    } catch (error) {
-      if (!(error instanceof FecTimeoutError)) {
-        throw error;
-      }
-
-      const smallerPageParams = {
-        ...refreshParams,
-        per_page: "10",
-      };
-      try {
-        refreshResp = await fecFetch(
-          "/schedules/schedule_a/",
-          apiKey,
-          smallerPageParams,
-          FEC_BACKGROUND_FETCH_TIMEOUT_MS
-        );
-      } catch (retryError) {
-        if (!(retryError instanceof FecTimeoutError)) {
-          throw retryError;
-        }
-
-        const tinyPageParams = {
-          ...refreshParams,
-          per_page: "1",
-        };
-        refreshResp = await fecFetch(
-          "/schedules/schedule_a/",
-          apiKey,
-          tinyPageParams,
-          FEC_BACKGROUND_FETCH_TIMEOUT_MS
-        );
-      }
-    }
-
-    if (!refreshResp.ok) {
-      const upstreamDetail = await readFecErrorDetails(refreshResp);
-      throw new Error(
-        `OpenFEC refresh failed (${refreshResp.status})${upstreamDetail ? `: ${upstreamDetail}` : ""}`
-      );
-    }
-
-    const refreshData = (await refreshResp.json()) as {
-      results?: FecContributionResult[];
-      pagination?: FecScheduleAPagination;
-    };
-
-    const rows = refreshData.results ?? [];
-    if (rows.length === 0) break;
-
-    allRows.push(...mapFecRowsToCacheRows(rows, candidateId, committeeId, twoYearPeriod));
-
-    const nextCursor = mapScheduleALastIndexesToCursor(refreshData.pagination?.last_indexes);
-    if (!nextCursor) break;
-
-    const nextSignature = JSON.stringify(nextCursor);
-    if (lastCursorSignature && lastCursorSignature === nextSignature) break;
-
-    cursor = nextCursor;
-    lastCursorSignature = nextSignature;
-  }
-
-  const { error: deleteError } = await sb
-    .from("contributions")
-    .delete()
-    .eq("candidate_id", candidateId);
-
-  if (deleteError) {
-    throw new Error(`Failed to clear cached contributions: ${deleteError.message}`);
-  }
-
-  if (allRows.length > 0) {
-    const chunkSize = 1000;
-    for (let i = 0; i < allRows.length; i += chunkSize) {
-      const chunk = allRows.slice(i, i + chunkSize);
-      const { error: insertError } = await sb.from("contributions").insert(chunk);
-      if (insertError) {
-        throw new Error(`Failed to cache contributions: ${insertError.message}`);
-      }
-    }
-  }
-
-  return allRows.length;
-}
-
-async function fetchAllCachedCandidateContributionRows(
-  sb: ReturnType<typeof getSupabase>,
-  candidateId: string
-): Promise<CachedContributionSummaryRow[]> {
-  const pageSize = 1000;
-  let from = 0;
-  const allRows: CachedContributionSummaryRow[] = [];
-
-  while (true) {
-    const to = from + pageSize - 1;
-    const { data, error } = await sb
-      .from("contributions")
-      .select(
-        "contributor_name, contributor_employer, contribution_amount, contribution_date, committee_name"
-      )
-      .eq("candidate_id", candidateId)
-      .range(from, to);
-
-    if (error) {
-      throw new Error(`Failed to query cached contributions: ${error.message}`);
-    }
-
-    const batch = (data ?? []) as CachedContributionSummaryRow[];
-    allRows.push(...batch);
-
-    if (batch.length < pageSize) break;
-    from += pageSize;
-  }
-
-  return allRows;
 }
 
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
@@ -585,27 +382,6 @@ openfec.get("/contributions", async (c) => {
     const pages = limit > 0 ? Math.max(1, Math.ceil(totalCount / limit)) : 1;
 
     if (hasCachedRows) {
-      if (isStale) {
-        c.executionCtx.waitUntil(
-          (async () => {
-            try {
-              const refreshSb = getSupabase(c.env);
-              const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-
-              await refreshCandidateContributionsCache(
-                refreshSb,
-                apiKey,
-                candidateId,
-                committeeId,
-                twoYearPeriod
-              );
-            } catch (error) {
-              console.error(`Background contribution refresh failed for ${candidateId}`, error);
-            }
-          })()
-        );
-      }
-
       return c.json({
         results: mapCachedRowsToApiRows(cachedRows ?? []),
         pagination: {
@@ -620,7 +396,7 @@ openfec.get("/contributions", async (c) => {
           per_page: limit,
           sort,
           stale: isStale,
-          refresh_queued: isStale,
+          refresh_queued: false,
         },
       }, 200, { "Cache-Control": "public, max-age=300" });
     }
@@ -668,22 +444,15 @@ openfec.get("/contributions", async (c) => {
         page,
       };
 
-      c.executionCtx.waitUntil(
-        (async () => {
-          try {
-            const refreshSb = getSupabase(c.env);
-            await refreshCandidateContributionsCache(
-              refreshSb,
-              apiKey,
-              candidateId,
-              committeeId,
-              twoYearPeriod
-            );
-          } catch (error) {
-            console.error(`Failed to warm contribution cache for ${candidateId}`, error);
-          }
-        })()
-      );
+      if (liveData.results?.length) {
+        const rows = mapFecRowsToCacheRows(
+          liveData.results,
+          candidateId,
+          committeeId,
+          twoYearPeriod
+        );
+        c.executionCtx.waitUntil(Promise.resolve(sb.from("contributions").insert(rows)));
+      }
 
       return c.json({
         ...liveData,
@@ -695,7 +464,7 @@ openfec.get("/contributions", async (c) => {
           page,
           per_page: limit,
           sort,
-          cache_refresh_queued: true,
+          cache_refresh_queued: false,
         },
       }, 200, { "Cache-Control": "no-store" });
     } catch (error) {
@@ -897,87 +666,25 @@ openfec.get("/contributions", async (c) => {
 });
 
 // ── GET /api/fec/candidates/:candidateId/summary ─────────────────────────────
-// Candidate contribution summary (aggregates + top donors) from cached rows.
+// Fast candidate summary using OpenFEC aggregates + top/bottom donation probes.
 openfec.get("/candidates/:candidateId/summary", async (c) => {
   const apiKey = c.env.OPENFEC_API_KEY;
   if (!apiKey) return c.json({ error: "OpenFEC API key not configured" }, 500);
-  if (!hasSupabase(c.env)) {
-    return c.json(
-      { error: "Supabase is required for candidate contribution summaries." },
-      500
-    );
-  }
 
   const candidateId = c.req.param("candidateId");
   const twoYearPeriod = c.req.query("two_year_period") ?? defaultTwoYearPeriod();
   const topNQuery = Number(c.req.query("top_n") ?? "10");
   const topN = topNQuery === 5 || topNQuery === 10 || topNQuery === 20 ? topNQuery : 10;
-  const sb = getSupabase(c.env);
 
   try {
-    const { data: latestRow, error: latestError } = await sb
-      .from("contributions")
-      .select("updated_at")
-      .eq("candidate_id", candidateId)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (latestError) {
-      console.warn(`Unable to read contribution freshness for ${candidateId}: ${latestError.message}`);
-    }
-
-    const latestUpdatedAt = latestRow?.updated_at ? new Date(latestRow.updated_at) : null;
-    const isStale =
-      !latestUpdatedAt ||
-      Number.isNaN(latestUpdatedAt.getTime()) ||
-      Date.now() - latestUpdatedAt.getTime() > CONTRIBUTIONS_CACHE_STALE_MS;
-
-    const { count: cachedCount, error: countError } = await sb
-      .from("contributions")
-      .select("id", { count: "exact", head: true })
-      .eq("candidate_id", candidateId);
-
-    if (countError) {
-      return c.json(
-        { error: `Failed to query cached contribution count: ${countError.message}` },
-        500
-      );
-    }
-
-    const hasCache = (cachedCount ?? 0) > 0;
-    const refreshQueued = isStale || !hasCache;
-    const refreshStarted = refreshQueued && tryAcquireSummaryRefreshLock(candidateId);
-
-    if (refreshStarted) {
-      c.executionCtx.waitUntil(
-        (async () => {
-          try {
-            const refreshSb = getSupabase(c.env);
-            const resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-            await refreshCandidateContributionsCache(
-              refreshSb,
-              apiKey,
-              candidateId,
-              resolvedCommitteeId,
-              twoYearPeriod
-            );
-          } catch (error) {
-            console.error(`Background summary refresh failed for ${candidateId}`, error);
-          } finally {
-            releaseSummaryRefreshLock(candidateId);
-          }
-        })()
-      );
-    }
-
-    if (!hasCache) {
+    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+    if (!committeeId) {
       return c.json(
         {
           candidate_id: candidateId,
           two_year_period: Number(twoYearPeriod),
           summary_pending: true,
-          message: "Contribution summary is being prepared. Try again shortly.",
+          message: "No committee could be resolved for this candidate yet.",
           summary: {
             donation_count: 0,
             total_donation_amount: 0,
@@ -995,55 +702,96 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
             selected_top_n: [],
           },
           query_context: {
-            source: "supabase_cache",
+            source: "openfec_live_summary",
             candidate_id: candidateId,
+            resolved_committee_id: null,
             two_year_transaction_period: Number(twoYearPeriod),
             top_n: topN,
-            stale: isStale,
-            refreshed: false,
-            refresh_queued: refreshStarted,
-            refresh_in_flight: refreshQueued && !refreshStarted,
-            resolved_committee_id: null,
-            cached_row_count: 0,
+            sampled_top_donors: true,
           },
         },
-        200,
-        { "Cache-Control": "no-store" }
+        200
       );
     }
 
-    const cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
+    const baseParams = {
+      committee_id: committeeId,
+      candidate_id: candidateId,
+      is_individual: "true",
+      two_year_transaction_period: twoYearPeriod,
+    };
 
-    const rowsWithAmount = cachedRows.filter(
-      (row): row is CachedContributionSummaryRow & { contribution_amount: number } =>
-        typeof row.contribution_amount === "number" && Number.isFinite(row.contribution_amount)
-    );
+    const [largestResp, smallestResp, topRowsResp, sizeResp] = await Promise.all([
+      fecFetch("/schedules/schedule_a/", apiKey, {
+        ...baseParams,
+        per_page: "1",
+        sort: "-contribution_receipt_amount",
+      }),
+      fecFetch("/schedules/schedule_a/", apiKey, {
+        ...baseParams,
+        per_page: "1",
+        sort: "contribution_receipt_amount",
+      }),
+      fecFetch("/schedules/schedule_a/", apiKey, {
+        ...baseParams,
+        per_page: "100",
+        sort: "-contribution_receipt_amount",
+      }),
+      fecFetch("/schedules/schedule_a/by_size/", apiKey, {
+        committee_id: committeeId,
+        two_year_transaction_period: twoYearPeriod,
+        is_individual: "true",
+        per_page: "100",
+      }),
+    ]);
 
-    const donationCount = rowsWithAmount.length;
-    const totalDonationAmount = rowsWithAmount.reduce(
-      (sum, row) => sum + row.contribution_amount,
+    const upstreamChecks: Array<{ label: string; resp: Response }> = [
+      { label: "largest", resp: largestResp },
+      { label: "smallest", resp: smallestResp },
+      { label: "top_rows", resp: topRowsResp },
+      { label: "by_size", resp: sizeResp },
+    ];
+    const upstreamFailure = upstreamChecks.find(({ resp }) => !resp.ok);
+
+    if (upstreamFailure) {
+      const upstreamDetail = await readFecErrorDetails(upstreamFailure.resp);
+      return c.json(
+        {
+          error: `OpenFEC summary query failed (${upstreamFailure.label})`,
+          detail: `status=${upstreamFailure.resp.status}${upstreamDetail ? ` | ${upstreamDetail}` : ""}`,
+        },
+        502
+      );
+    }
+
+    const largestData = (await largestResp.json()) as {
+      results?: FecContributionResult[];
+      pagination?: FecScheduleAPagination;
+    };
+    const smallestData = (await smallestResp.json()) as {
+      results?: FecContributionResult[];
+    };
+    const topRowsData = (await topRowsResp.json()) as {
+      results?: FecContributionResult[];
+      pagination?: FecScheduleAPagination;
+    };
+    const sizeData = (await sizeResp.json()) as {
+      results?: Array<{
+        total?: number;
+      }>;
+    };
+
+    const largestRow = largestData.results?.[0];
+    const smallestRow = smallestData.results?.[0];
+    const donationCount = largestData.pagination?.count ?? topRowsData.pagination?.count ?? 0;
+    const totalDonationAmount = (sizeData.results ?? []).reduce(
+      (sum, row) => sum + (row.total ?? 0),
       0
     );
-    const meanDonationAmount = donationCount > 0 ? totalDonationAmount / donationCount : null;
-    const sortedAmounts = rowsWithAmount
-      .map((row) => row.contribution_amount)
-      .sort((a, b) => a - b);
-    const medianDonationAmount =
-      donationCount === 0
-        ? null
-        : donationCount % 2 === 1
-          ? sortedAmounts[(donationCount - 1) / 2]
-          : (sortedAmounts[donationCount / 2 - 1] + sortedAmounts[donationCount / 2]) / 2;
+    const meanDonationAmount =
+      donationCount > 0 ? totalDonationAmount / donationCount : null;
 
-    const largestDonationRow = rowsWithAmount.reduce<
-      (CachedContributionSummaryRow & { contribution_amount: number }) | null
-    >((max, row) => (!max || row.contribution_amount > max.contribution_amount ? row : max), null);
-
-    const smallestDonationRow = rowsWithAmount.reduce<
-      (CachedContributionSummaryRow & { contribution_amount: number }) | null
-    >((min, row) => (!min || row.contribution_amount < min.contribution_amount ? row : min), null);
-
-    const donorMap = new Map<
+    const topDonorMap = new Map<
       string,
       {
         donor_name: string;
@@ -1053,63 +801,128 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
       }
     >();
 
-    for (const row of rowsWithAmount) {
+    for (const row of topRowsData.results ?? []) {
+      const amount = row.contribution_receipt_amount ?? 0;
+      if (!Number.isFinite(amount)) continue;
       const donorName = row.contributor_name?.trim() || "Unknown contributor";
       const donorKey = donorName.toUpperCase();
-      const existing = donorMap.get(donorKey);
-
+      const existing = topDonorMap.get(donorKey);
       if (!existing) {
-        donorMap.set(donorKey, {
+        topDonorMap.set(donorKey, {
           donor_name: donorName,
           donation_count: 1,
-          total_donation_amount: row.contribution_amount,
-          largest_single_donation: row.contribution_amount,
+          total_donation_amount: amount,
+          largest_single_donation: amount,
         });
         continue;
       }
-
       existing.donation_count += 1;
-      existing.total_donation_amount += row.contribution_amount;
-      if (row.contribution_amount > existing.largest_single_donation) {
-        existing.largest_single_donation = row.contribution_amount;
+      existing.total_donation_amount += amount;
+      if (amount > existing.largest_single_donation) {
+        existing.largest_single_donation = amount;
       }
     }
 
-    const sortedDonors = Array.from(donorMap.values()).sort((a, b) => {
+    const sortedTopDonors = Array.from(topDonorMap.values()).sort((a, b) => {
       if (b.total_donation_amount !== a.total_donation_amount) {
         return b.total_donation_amount - a.total_donation_amount;
       }
       if (b.largest_single_donation !== a.largest_single_donation) {
         return b.largest_single_donation - a.largest_single_donation;
       }
-      if (b.donation_count !== a.donation_count) {
-        return b.donation_count - a.donation_count;
-      }
       return a.donor_name.localeCompare(b.donor_name);
     });
 
-    const highestDonationByEmployer = rowsWithAmount.reduce<{
-      employer: string;
-      contribution_amount: number;
-      contributor_name: string | null;
-      contribution_date: string | null;
-      committee_name: string | null;
-    } | null>((max, row) => {
-      const employer = row.contributor_employer?.trim();
-      if (!employer) return max;
+    let topEmployer:
+      | {
+          employer: string;
+          total: number;
+          count?: number | null;
+        }
+      | null = null;
+    let employerSource: "fec_by_employer" | "sampled_top_rows" | "none" = "none";
 
-      if (!max || row.contribution_amount > max.contribution_amount) {
-        return {
-          employer,
-          contribution_amount: row.contribution_amount,
-          contributor_name: row.contributor_name ?? null,
-          contribution_date: row.contribution_date ?? null,
-          committee_name: row.committee_name ?? null,
+    try {
+      const employerResp = await fecFetch(
+        "/schedules/schedule_a/by_employer/",
+        apiKey,
+        {
+          committee_id: committeeId,
+          candidate_id: candidateId,
+          two_year_transaction_period: twoYearPeriod,
+          is_individual: "true",
+          per_page: "1",
+          sort: "-total",
+        },
+        8_000
+      );
+
+      if (employerResp.ok) {
+        const employerData = (await employerResp.json()) as {
+          results?: Array<{
+            employer?: string;
+            total?: number;
+            count?: number | null;
+          }>;
         };
+        const row = (employerData.results ?? []).find(
+          (r) => !!r.employer && typeof r.total === "number"
+        );
+        if (row?.employer && typeof row.total === "number") {
+          topEmployer = {
+            employer: row.employer,
+            total: row.total,
+            count: row.count ?? null,
+          };
+          employerSource = "fec_by_employer";
+        }
+      }
+    } catch {
+      // Best effort only; we will fall back to sampled top rows if available.
+    }
+
+    if (!topEmployer) {
+      const employerMap = new Map<
+        string,
+        { employer: string; total: number; largestSingleDonation: number }
+      >();
+      for (const row of topRowsData.results ?? []) {
+        const employer = row.contributor_employer?.trim();
+        const amount = row.contribution_receipt_amount ?? 0;
+        if (!employer || !Number.isFinite(amount)) continue;
+        const key = employer.toUpperCase();
+        const existing = employerMap.get(key);
+        if (!existing) {
+          employerMap.set(key, {
+            employer,
+            total: amount,
+            largestSingleDonation: amount,
+          });
+          continue;
+        }
+        existing.total += amount;
+        if (amount > existing.largestSingleDonation) {
+          existing.largestSingleDonation = amount;
+        }
       }
 
-      return max;
-    }, null);
+      const sampledTopEmployer = Array.from(employerMap.values()).sort((a, b) => {
+        if (b.total !== a.total) return b.total - a.total;
+        if (b.largestSingleDonation !== a.largestSingleDonation) {
+          return b.largestSingleDonation - a.largestSingleDonation;
+        }
+        return a.employer.localeCompare(b.employer);
+      })[0];
+
+      if (sampledTopEmployer) {
+        topEmployer = {
+          employer: sampledTopEmployer.employer,
+          total: sampledTopEmployer.total,
+          count: null,
+        };
+        employerSource = "sampled_top_rows";
+      }
+    }
 
     return c.json(
       {
@@ -1120,50 +933,65 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
           total_donation_amount: totalDonationAmount,
           average_donation_amount: meanDonationAmount,
           mean_donation_amount: meanDonationAmount,
-          median_donation_amount: medianDonationAmount,
-          largest_donation: largestDonationRow
+          median_donation_amount: null,
+          largest_donation: largestRow
             ? {
-                contribution_amount: largestDonationRow.contribution_amount,
-                contributor_name: largestDonationRow.contributor_name ?? null,
-                contributor_employer: largestDonationRow.contributor_employer ?? null,
-                contribution_date: largestDonationRow.contribution_date ?? null,
-                committee_name: largestDonationRow.committee_name ?? null,
+                contribution_amount: largestRow.contribution_receipt_amount ?? 0,
+                contributor_name: largestRow.contributor_name ?? null,
+                contributor_employer: largestRow.contributor_employer ?? null,
+                contribution_date: largestRow.contribution_receipt_date ?? null,
+                committee_name: largestRow.committee?.name ?? null,
               }
             : null,
-          smallest_donation: smallestDonationRow
+          smallest_donation: smallestRow
             ? {
-                contribution_amount: smallestDonationRow.contribution_amount,
-                contributor_name: smallestDonationRow.contributor_name ?? null,
-                contributor_employer: smallestDonationRow.contributor_employer ?? null,
-                contribution_date: smallestDonationRow.contribution_date ?? null,
-                committee_name: smallestDonationRow.committee_name ?? null,
+                contribution_amount: smallestRow.contribution_receipt_amount ?? 0,
+                contributor_name: smallestRow.contributor_name ?? null,
+                contributor_employer: smallestRow.contributor_employer ?? null,
+                contribution_date: smallestRow.contribution_receipt_date ?? null,
+                committee_name: smallestRow.committee?.name ?? null,
               }
             : null,
-          highest_donation_by_employer: highestDonationByEmployer,
+          highest_donation_by_employer: topEmployer
+            ? {
+                employer: topEmployer.employer,
+                contribution_amount: topEmployer.total,
+                contributor_name: null,
+                contribution_date: null,
+                committee_name: null,
+              }
+            : null,
         },
         top_donors: {
-          top_5: sortedDonors.slice(0, 5),
-          top_10: sortedDonors.slice(0, 10),
-          top_20: sortedDonors.slice(0, 20),
-          selected_top_n: sortedDonors.slice(0, topN),
+          top_5: sortedTopDonors.slice(0, 5),
+          top_10: sortedTopDonors.slice(0, 10),
+          top_20: sortedTopDonors.slice(0, 20),
+          selected_top_n: sortedTopDonors.slice(0, topN),
         },
         query_context: {
-          source: "supabase_cache",
+          source: "openfec_live_summary",
           candidate_id: candidateId,
+          resolved_committee_id: committeeId,
           two_year_transaction_period: Number(twoYearPeriod),
           top_n: topN,
-          stale: isStale,
-          refreshed: false,
-          refresh_queued: refreshStarted,
-          refresh_in_flight: refreshQueued && !refreshStarted,
-          resolved_committee_id: null,
-          cached_row_count: cachedRows.length,
+          sampled_top_donors: true,
+          sampled_top_donor_rows: (topRowsData.results ?? []).length,
+          employer_source: employerSource,
         },
       },
       200,
-      { "Cache-Control": refreshQueued ? "no-store" : "public, max-age=300" }
+      { "Cache-Control": "public, max-age=300" }
     );
   } catch (error) {
+    if (error instanceof FecTimeoutError) {
+      return c.json(
+        {
+          error: "OpenFEC request timed out",
+          detail: "Summary query timed out upstream. Please retry shortly.",
+        },
+        504
+      );
+    }
     return c.json({ error: "Failed to build candidate contribution summary" }, 502);
   }
 });

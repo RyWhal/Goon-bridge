@@ -152,6 +152,7 @@ export function FecSearch() {
   });
   const summaryRequestInFlightRef = useRef(false);
   const summaryLastRequestAtRef = useRef(0);
+  const summaryLastAutoRequestKeyRef = useRef("");
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
   const candidateSummary = useApi<CandidateContributionSummaryResponse>();
@@ -234,12 +235,16 @@ export function FecSearch() {
   };
 
   const handleCandidateClick = (c: CandidateResult) => {
+    summaryLastAutoRequestKeyRef.current = "";
     setSelectedCandidate(c);
     setCandidateTopN(10);
   };
 
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
+    const requestKey = `${selectedCandidate.candidate_id}:${candidateTopN}`;
+    if (summaryLastAutoRequestKeyRef.current === requestKey) return;
+    summaryLastAutoRequestKeyRef.current = requestKey;
     void fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN, { force: true });
   }, [candidateTopN, selectedCandidate?.candidate_id, fetchCandidateSummary]);
 
