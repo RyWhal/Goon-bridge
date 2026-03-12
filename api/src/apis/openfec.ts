@@ -7,8 +7,10 @@ const openfec = new Hono<Env>();
 const BASE = "https://api.open.fec.gov/v1";
 const FEC_FETCH_TIMEOUT_MS = 12_000;
 const CONTRIBUTIONS_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
-const CANDIDATE_REFRESH_PER_PAGE = 100;
+const CANDIDATE_REFRESH_PER_PAGE = 25;
 const CANDIDATE_REFRESH_MAX_PAGES = 100;
+const SUMMARY_REFRESH_DEBOUNCE_MS = 2 * 60 * 1000;
+const summaryRefreshLocks = new Map<string, number>();
 
 class FecTimeoutError extends Error {
   constructor(message = "OpenFEC request timed out") {
@@ -217,6 +219,18 @@ function mapScheduleALastIndexesToCursor(
   return Object.keys(cursor).length ? cursor : null;
 }
 
+function tryAcquireSummaryRefreshLock(candidateId: string): boolean {
+  const now = Date.now();
+  const existingUntil = summaryRefreshLocks.get(candidateId) ?? 0;
+  if (existingUntil > now) return false;
+  summaryRefreshLocks.set(candidateId, now + SUMMARY_REFRESH_DEBOUNCE_MS);
+  return true;
+}
+
+function releaseSummaryRefreshLock(candidateId: string): void {
+  summaryRefreshLocks.delete(candidateId);
+}
+
 function mapCachedRowsToApiRows(rows: Array<{
   candidate_id: string | null;
   committee_id: string | null;
@@ -260,7 +274,6 @@ async function refreshCandidateContributionsCache(
     refreshPage += 1
   ) {
     const refreshParams: Record<string, string> = {
-      candidate_id: candidateId,
       per_page: String(CANDIDATE_REFRESH_PER_PAGE),
       sort: "-contribution_receipt_date",
       is_individual: "true",
@@ -269,6 +282,8 @@ async function refreshCandidateContributionsCache(
 
     if (committeeId) {
       refreshParams["committee_id"] = committeeId;
+    } else {
+      refreshParams["candidate_id"] = candidateId;
     }
 
     if (cursor) {
@@ -277,7 +292,20 @@ async function refreshCandidateContributionsCache(
       }
     }
 
-    const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, refreshParams);
+    let refreshResp: Response;
+    try {
+      refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, refreshParams);
+    } catch (error) {
+      if (!(error instanceof FecTimeoutError)) {
+        throw error;
+      }
+
+      const smallerPageParams = {
+        ...refreshParams,
+        per_page: "10",
+      };
+      refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, smallerPageParams);
+    }
 
     if (!refreshResp.ok) {
       const upstreamDetail = await readFecErrorDetails(refreshResp);
@@ -868,35 +896,86 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
       Number.isNaN(latestUpdatedAt.getTime()) ||
       Date.now() - latestUpdatedAt.getTime() > CONTRIBUTIONS_CACHE_STALE_MS;
 
-    let refreshPerformed = false;
-    let resolvedCommitteeId: string | null = null;
+    const { count: cachedCount, error: countError } = await sb
+      .from("contributions")
+      .select("id", { count: "exact", head: true })
+      .eq("candidate_id", candidateId);
 
-    if (isStale) {
-      resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-      await refreshCandidateContributionsCache(
-        sb,
-        apiKey,
-        candidateId,
-        resolvedCommitteeId,
-        twoYearPeriod
+    if (countError) {
+      return c.json(
+        { error: `Failed to query cached contribution count: ${countError.message}` },
+        500
       );
-      refreshPerformed = true;
     }
 
-    let cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
+    const hasCache = (cachedCount ?? 0) > 0;
+    const refreshQueued = isStale || !hasCache;
+    const refreshStarted = refreshQueued && tryAcquireSummaryRefreshLock(candidateId);
 
-    if (cachedRows.length === 0 && !refreshPerformed) {
-      resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-      await refreshCandidateContributionsCache(
-        sb,
-        apiKey,
-        candidateId,
-        resolvedCommitteeId,
-        twoYearPeriod
+    if (refreshStarted) {
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const refreshSb = getSupabase(c.env);
+            const resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+            await refreshCandidateContributionsCache(
+              refreshSb,
+              apiKey,
+              candidateId,
+              resolvedCommitteeId,
+              twoYearPeriod
+            );
+          } catch (error) {
+            console.error(`Background summary refresh failed for ${candidateId}`, error);
+          } finally {
+            releaseSummaryRefreshLock(candidateId);
+          }
+        })()
       );
-      refreshPerformed = true;
-      cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
     }
+
+    if (!hasCache) {
+      return c.json(
+        {
+          candidate_id: candidateId,
+          two_year_period: Number(twoYearPeriod),
+          summary_pending: true,
+          message: "Contribution summary is being prepared. Try again shortly.",
+          summary: {
+            donation_count: 0,
+            total_donation_amount: 0,
+            average_donation_amount: null,
+            mean_donation_amount: null,
+            median_donation_amount: null,
+            largest_donation: null,
+            smallest_donation: null,
+            highest_donation_by_employer: null,
+          },
+          top_donors: {
+            top_5: [],
+            top_10: [],
+            top_20: [],
+            selected_top_n: [],
+          },
+          query_context: {
+            source: "supabase_cache",
+            candidate_id: candidateId,
+            two_year_transaction_period: Number(twoYearPeriod),
+            top_n: topN,
+            stale: isStale,
+            refreshed: false,
+            refresh_queued: refreshStarted,
+            refresh_in_flight: refreshQueued && !refreshStarted,
+            resolved_committee_id: null,
+            cached_row_count: 0,
+          },
+        },
+        200,
+        { "Cache-Control": "no-store" }
+      );
+    }
+
+    const cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
 
     const rowsWithAmount = cachedRows.filter(
       (row): row is CachedContributionSummaryRow & { contribution_amount: number } =>
@@ -1037,24 +1116,17 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
           two_year_transaction_period: Number(twoYearPeriod),
           top_n: topN,
           stale: isStale,
-          refreshed: refreshPerformed,
-          resolved_committee_id: resolvedCommitteeId,
+          refreshed: false,
+          refresh_queued: refreshStarted,
+          refresh_in_flight: refreshQueued && !refreshStarted,
+          resolved_committee_id: null,
           cached_row_count: cachedRows.length,
         },
       },
       200,
-      { "Cache-Control": "public, max-age=300" }
+      { "Cache-Control": refreshQueued ? "no-store" : "public, max-age=300" }
     );
   } catch (error) {
-    if (error instanceof FecTimeoutError) {
-      return c.json(
-        {
-          error: "OpenFEC request timed out",
-          detail: "Candidate summary refresh took too long; try again shortly.",
-        },
-        504
-      );
-    }
     return c.json({ error: "Failed to build candidate contribution summary" }, 502);
   }
 });

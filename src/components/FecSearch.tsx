@@ -62,6 +62,8 @@ interface SummaryTopDonor {
 interface CandidateContributionSummaryResponse {
   candidate_id: string;
   two_year_period: number;
+  summary_pending?: boolean;
+  message?: string;
   summary: {
     donation_count: number;
     total_donation_amount: number;
@@ -478,6 +480,14 @@ export function FecSearch() {
               </div>
             )}
 
+            {candidateSummary.data?.summary_pending && (
+              <div className="px-3 py-2 bg-vibe-border/40 rounded">
+                <p className="text-xs text-vibe-dim">
+                  {candidateSummary.data.message ?? "Summary is being prepared. Try again shortly."}
+                </p>
+              </div>
+            )}
+
             {candidateSummary.data && (
               <div className="space-y-3">
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -581,6 +591,7 @@ export function FecSearch() {
 
             {!candidateSummary.loading &&
               !candidateSummary.error &&
+              !candidateSummary.data?.summary_pending &&
               candidateSummary.data?.summary.donation_count === 0 && (
                 <p className="text-xs text-vibe-dim italic">
                   No contribution records found for this candidate in the selected period.
