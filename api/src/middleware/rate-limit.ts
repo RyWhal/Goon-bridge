@@ -18,7 +18,8 @@ interface RateLimitEntry {
 
 const store = new Map<string, RateLimitEntry>();
 const WINDOW_MS = 60_000;
-const MAX_REQUESTS = 60;
+const MAX_REQUESTS_PRODUCTION = 60;
+const MAX_REQUESTS_NON_PRODUCTION = 600;
 
 // Periodic cleanup to avoid unbounded memory growth
 let lastCleanup = Date.now();
@@ -37,6 +38,10 @@ function getClientIp(c: Context<Env>): string {
 
 export async function rateLimitMiddleware(c: Context<Env>, next: Next) {
   cleanup();
+  const maxRequests =
+    c.env.ENVIRONMENT === "production"
+      ? MAX_REQUESTS_PRODUCTION
+      : MAX_REQUESTS_NON_PRODUCTION;
 
   const ip = getClientIp(c);
   const now = Date.now();
@@ -50,11 +55,11 @@ export async function rateLimitMiddleware(c: Context<Env>, next: Next) {
   entry.count++;
 
   // Always set rate limit headers
-  c.header("X-RateLimit-Limit", MAX_REQUESTS.toString());
-  c.header("X-RateLimit-Remaining", Math.max(0, MAX_REQUESTS - entry.count).toString());
+  c.header("X-RateLimit-Limit", maxRequests.toString());
+  c.header("X-RateLimit-Remaining", Math.max(0, maxRequests - entry.count).toString());
   c.header("X-RateLimit-Reset", Math.ceil(entry.resetAt / 1000).toString());
 
-  if (entry.count > MAX_REQUESTS) {
+  if (entry.count > maxRequests) {
     return c.json(
       { error: "Rate limit exceeded. Try again later." },
       429,

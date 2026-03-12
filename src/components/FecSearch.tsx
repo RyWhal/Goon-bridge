@@ -113,8 +113,6 @@ const OFFICE_OPTIONS = [
 ];
 
 const PAGE_SIZE = 20;
-const SUMMARY_POLL_INTERVAL_MS = 3000;
-const SUMMARY_MAX_POLL_ATTEMPTS = 40;
 const SUMMARY_MIN_REQUEST_GAP_MS = 2500;
 
 function cursorFromLastIndexes(
@@ -152,7 +150,6 @@ export function FecSearch() {
   const [contributionsCursors, setContributionsCursors] = useState<Record<number, ContributionCursor | null>>({
     1: null,
   });
-  const [summaryPollAttempts, setSummaryPollAttempts] = useState(0);
   const summaryRequestInFlightRef = useRef(false);
   const summaryLastRequestAtRef = useRef(0);
   const candidates = useApi<CandidateSearchResponse>();
@@ -239,37 +236,12 @@ export function FecSearch() {
   const handleCandidateClick = (c: CandidateResult) => {
     setSelectedCandidate(c);
     setCandidateTopN(10);
-    setSummaryPollAttempts(0);
   };
 
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
-    setSummaryPollAttempts(0);
     void fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN, { force: true });
   }, [candidateTopN, selectedCandidate?.candidate_id, fetchCandidateSummary]);
-
-  useEffect(() => {
-    if (!selectedCandidate?.candidate_id) return;
-    if (candidateSummary.loading) return;
-    if (candidateSummary.error) return;
-    if (!candidateSummary.data?.summary_pending) return;
-    if (summaryPollAttempts >= SUMMARY_MAX_POLL_ATTEMPTS) return;
-
-    const timer = setTimeout(() => {
-      void fetchCandidateSummary(selectedCandidate.candidate_id!, candidateTopN);
-      setSummaryPollAttempts((n) => n + 1);
-    }, SUMMARY_POLL_INTERVAL_MS);
-
-    return () => clearTimeout(timer);
-  }, [
-    candidateSummary.data?.summary_pending,
-    candidateSummary.error,
-    candidateSummary.loading,
-    candidateTopN,
-    fetchCandidateSummary,
-    selectedCandidate?.candidate_id,
-    summaryPollAttempts,
-  ]);
 
   useEffect(() => {
     if (mode !== "contributions") return;
@@ -537,7 +509,8 @@ export function FecSearch() {
               <div className="px-3 py-2 bg-vibe-border/40 rounded">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs text-vibe-dim">
-                    {candidateSummary.data.message ?? "Summary is being prepared. Try again shortly."}
+                    {candidateSummary.data.message ??
+                      "Summary is being prepared. Use Retry now in a few seconds to refresh."}
                   </p>
                   <button
                     className="btn btn-ghost text-xs py-1"
