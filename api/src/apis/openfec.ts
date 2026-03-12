@@ -43,6 +43,21 @@ interface CachedContributionRow {
   two_year_period: number | null;
 }
 
+interface FecScheduleAPagination {
+  count?: number;
+  page?: number;
+  pages?: number;
+  last_indexes?: Record<string, string | number>;
+}
+
+interface CachedContributionSummaryRow {
+  contributor_name: string | null;
+  contributor_employer: string | null;
+  contribution_amount: number | null;
+  contribution_date: string | null;
+  committee_name: string | null;
+}
+
 function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
 }
@@ -180,6 +195,28 @@ function mapFecRowsToCacheRows(
   }));
 }
 
+function mapScheduleALastIndexesToCursor(
+  lastIndexes?: Record<string, string | number>
+): Record<string, string> | null {
+  if (!lastIndexes) return null;
+
+  const cursor: Record<string, string> = {};
+  if (lastIndexes.last_index != null) {
+    cursor["last_index"] = String(lastIndexes.last_index);
+  }
+  if (lastIndexes.last_contribution_receipt_amount != null) {
+    cursor["last_contribution_receipt_amount"] = String(lastIndexes.last_contribution_receipt_amount);
+  }
+  if (lastIndexes.last_contribution_receipt_date != null) {
+    cursor["last_contribution_receipt_date"] = String(lastIndexes.last_contribution_receipt_date);
+  }
+  if (lastIndexes.sort_null_only != null) {
+    cursor["sort_null_only"] = String(lastIndexes.sort_null_only);
+  }
+
+  return Object.keys(cursor).length ? cursor : null;
+}
+
 function mapCachedRowsToApiRows(rows: Array<{
   candidate_id: string | null;
   committee_id: string | null;
@@ -214,6 +251,8 @@ async function refreshCandidateContributionsCache(
   twoYearPeriod: string
 ): Promise<number> {
   const allRows: CachedContributionRow[] = [];
+  let cursor: Record<string, string> | null = null;
+  let lastCursorSignature: string | null = null;
 
   for (
     let refreshPage = 1;
@@ -223,7 +262,6 @@ async function refreshCandidateContributionsCache(
     const refreshParams: Record<string, string> = {
       candidate_id: candidateId,
       per_page: String(CANDIDATE_REFRESH_PER_PAGE),
-      page: String(refreshPage),
       sort: "-contribution_receipt_date",
       is_individual: "true",
       two_year_transaction_period: twoYearPeriod,
@@ -231,6 +269,12 @@ async function refreshCandidateContributionsCache(
 
     if (committeeId) {
       refreshParams["committee_id"] = committeeId;
+    }
+
+    if (cursor) {
+      for (const [key, value] of Object.entries(cursor)) {
+        refreshParams[key] = value;
+      }
     }
 
     const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, refreshParams);
@@ -244,7 +288,7 @@ async function refreshCandidateContributionsCache(
 
     const refreshData = (await refreshResp.json()) as {
       results?: FecContributionResult[];
-      pagination?: { pages?: number };
+      pagination?: FecScheduleAPagination;
     };
 
     const rows = refreshData.results ?? [];
@@ -252,8 +296,14 @@ async function refreshCandidateContributionsCache(
 
     allRows.push(...mapFecRowsToCacheRows(rows, candidateId, committeeId, twoYearPeriod));
 
-    const pages = refreshData.pagination?.pages ?? refreshPage;
-    if (refreshPage >= pages) break;
+    const nextCursor = mapScheduleALastIndexesToCursor(refreshData.pagination?.last_indexes);
+    if (!nextCursor) break;
+
+    const nextSignature = JSON.stringify(nextCursor);
+    if (lastCursorSignature && lastCursorSignature === nextSignature) break;
+
+    cursor = nextCursor;
+    lastCursorSignature = nextSignature;
   }
 
   const { error: deleteError } = await sb
@@ -277,6 +327,38 @@ async function refreshCandidateContributionsCache(
   }
 
   return allRows.length;
+}
+
+async function fetchAllCachedCandidateContributionRows(
+  sb: ReturnType<typeof getSupabase>,
+  candidateId: string
+): Promise<CachedContributionSummaryRow[]> {
+  const pageSize = 1000;
+  let from = 0;
+  const allRows: CachedContributionSummaryRow[] = [];
+
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await sb
+      .from("contributions")
+      .select(
+        "contributor_name, contributor_employer, contribution_amount, contribution_date, committee_name"
+      )
+      .eq("candidate_id", candidateId)
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Failed to query cached contributions: ${error.message}`);
+    }
+
+    const batch = (data ?? []) as CachedContributionSummaryRow[];
+    allRows.push(...batch);
+
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return allRows;
 }
 
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
@@ -746,6 +828,234 @@ openfec.get("/contributions", async (c) => {
       }, 504);
     }
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
+  }
+});
+
+// ── GET /api/fec/candidates/:candidateId/summary ─────────────────────────────
+// Candidate contribution summary (aggregates + top donors) from cached rows.
+openfec.get("/candidates/:candidateId/summary", async (c) => {
+  const apiKey = c.env.OPENFEC_API_KEY;
+  if (!apiKey) return c.json({ error: "OpenFEC API key not configured" }, 500);
+  if (!hasSupabase(c.env)) {
+    return c.json(
+      { error: "Supabase is required for candidate contribution summaries." },
+      500
+    );
+  }
+
+  const candidateId = c.req.param("candidateId");
+  const twoYearPeriod = c.req.query("two_year_period") ?? defaultTwoYearPeriod();
+  const topNQuery = Number(c.req.query("top_n") ?? "10");
+  const topN = topNQuery === 5 || topNQuery === 10 || topNQuery === 20 ? topNQuery : 10;
+  const sb = getSupabase(c.env);
+
+  try {
+    const { data: latestRow, error: latestError } = await sb
+      .from("contributions")
+      .select("updated_at")
+      .eq("candidate_id", candidateId)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestError) {
+      console.warn(`Unable to read contribution freshness for ${candidateId}: ${latestError.message}`);
+    }
+
+    const latestUpdatedAt = latestRow?.updated_at ? new Date(latestRow.updated_at) : null;
+    const isStale =
+      !latestUpdatedAt ||
+      Number.isNaN(latestUpdatedAt.getTime()) ||
+      Date.now() - latestUpdatedAt.getTime() > CONTRIBUTIONS_CACHE_STALE_MS;
+
+    let refreshPerformed = false;
+    let resolvedCommitteeId: string | null = null;
+
+    if (isStale) {
+      resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+      await refreshCandidateContributionsCache(
+        sb,
+        apiKey,
+        candidateId,
+        resolvedCommitteeId,
+        twoYearPeriod
+      );
+      refreshPerformed = true;
+    }
+
+    let cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
+
+    if (cachedRows.length === 0 && !refreshPerformed) {
+      resolvedCommitteeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+      await refreshCandidateContributionsCache(
+        sb,
+        apiKey,
+        candidateId,
+        resolvedCommitteeId,
+        twoYearPeriod
+      );
+      refreshPerformed = true;
+      cachedRows = await fetchAllCachedCandidateContributionRows(sb, candidateId);
+    }
+
+    const rowsWithAmount = cachedRows.filter(
+      (row): row is CachedContributionSummaryRow & { contribution_amount: number } =>
+        typeof row.contribution_amount === "number" && Number.isFinite(row.contribution_amount)
+    );
+
+    const donationCount = rowsWithAmount.length;
+    const totalDonationAmount = rowsWithAmount.reduce(
+      (sum, row) => sum + row.contribution_amount,
+      0
+    );
+    const meanDonationAmount = donationCount > 0 ? totalDonationAmount / donationCount : null;
+    const sortedAmounts = rowsWithAmount
+      .map((row) => row.contribution_amount)
+      .sort((a, b) => a - b);
+    const medianDonationAmount =
+      donationCount === 0
+        ? null
+        : donationCount % 2 === 1
+          ? sortedAmounts[(donationCount - 1) / 2]
+          : (sortedAmounts[donationCount / 2 - 1] + sortedAmounts[donationCount / 2]) / 2;
+
+    const largestDonationRow = rowsWithAmount.reduce<
+      (CachedContributionSummaryRow & { contribution_amount: number }) | null
+    >((max, row) => (!max || row.contribution_amount > max.contribution_amount ? row : max), null);
+
+    const smallestDonationRow = rowsWithAmount.reduce<
+      (CachedContributionSummaryRow & { contribution_amount: number }) | null
+    >((min, row) => (!min || row.contribution_amount < min.contribution_amount ? row : min), null);
+
+    const donorMap = new Map<
+      string,
+      {
+        donor_name: string;
+        donation_count: number;
+        total_donation_amount: number;
+        largest_single_donation: number;
+      }
+    >();
+
+    for (const row of rowsWithAmount) {
+      const donorName = row.contributor_name?.trim() || "Unknown contributor";
+      const donorKey = donorName.toUpperCase();
+      const existing = donorMap.get(donorKey);
+
+      if (!existing) {
+        donorMap.set(donorKey, {
+          donor_name: donorName,
+          donation_count: 1,
+          total_donation_amount: row.contribution_amount,
+          largest_single_donation: row.contribution_amount,
+        });
+        continue;
+      }
+
+      existing.donation_count += 1;
+      existing.total_donation_amount += row.contribution_amount;
+      if (row.contribution_amount > existing.largest_single_donation) {
+        existing.largest_single_donation = row.contribution_amount;
+      }
+    }
+
+    const sortedDonors = Array.from(donorMap.values()).sort((a, b) => {
+      if (b.total_donation_amount !== a.total_donation_amount) {
+        return b.total_donation_amount - a.total_donation_amount;
+      }
+      if (b.largest_single_donation !== a.largest_single_donation) {
+        return b.largest_single_donation - a.largest_single_donation;
+      }
+      if (b.donation_count !== a.donation_count) {
+        return b.donation_count - a.donation_count;
+      }
+      return a.donor_name.localeCompare(b.donor_name);
+    });
+
+    const highestDonationByEmployer = rowsWithAmount.reduce<{
+      employer: string;
+      contribution_amount: number;
+      contributor_name: string | null;
+      contribution_date: string | null;
+      committee_name: string | null;
+    } | null>((max, row) => {
+      const employer = row.contributor_employer?.trim();
+      if (!employer) return max;
+
+      if (!max || row.contribution_amount > max.contribution_amount) {
+        return {
+          employer,
+          contribution_amount: row.contribution_amount,
+          contributor_name: row.contributor_name ?? null,
+          contribution_date: row.contribution_date ?? null,
+          committee_name: row.committee_name ?? null,
+        };
+      }
+
+      return max;
+    }, null);
+
+    return c.json(
+      {
+        candidate_id: candidateId,
+        two_year_period: Number(twoYearPeriod),
+        summary: {
+          donation_count: donationCount,
+          total_donation_amount: totalDonationAmount,
+          average_donation_amount: meanDonationAmount,
+          mean_donation_amount: meanDonationAmount,
+          median_donation_amount: medianDonationAmount,
+          largest_donation: largestDonationRow
+            ? {
+                contribution_amount: largestDonationRow.contribution_amount,
+                contributor_name: largestDonationRow.contributor_name ?? null,
+                contributor_employer: largestDonationRow.contributor_employer ?? null,
+                contribution_date: largestDonationRow.contribution_date ?? null,
+                committee_name: largestDonationRow.committee_name ?? null,
+              }
+            : null,
+          smallest_donation: smallestDonationRow
+            ? {
+                contribution_amount: smallestDonationRow.contribution_amount,
+                contributor_name: smallestDonationRow.contributor_name ?? null,
+                contributor_employer: smallestDonationRow.contributor_employer ?? null,
+                contribution_date: smallestDonationRow.contribution_date ?? null,
+                committee_name: smallestDonationRow.committee_name ?? null,
+              }
+            : null,
+          highest_donation_by_employer: highestDonationByEmployer,
+        },
+        top_donors: {
+          top_5: sortedDonors.slice(0, 5),
+          top_10: sortedDonors.slice(0, 10),
+          top_20: sortedDonors.slice(0, 20),
+          selected_top_n: sortedDonors.slice(0, topN),
+        },
+        query_context: {
+          source: "supabase_cache",
+          candidate_id: candidateId,
+          two_year_transaction_period: Number(twoYearPeriod),
+          top_n: topN,
+          stale: isStale,
+          refreshed: refreshPerformed,
+          resolved_committee_id: resolvedCommitteeId,
+          cached_row_count: cachedRows.length,
+        },
+      },
+      200,
+      { "Cache-Control": "public, max-age=300" }
+    );
+  } catch (error) {
+    if (error instanceof FecTimeoutError) {
+      return c.json(
+        {
+          error: "OpenFEC request timed out",
+          detail: "Candidate summary refresh took too long; try again shortly.",
+        },
+        504
+      );
+    }
+    return c.json({ error: "Failed to build candidate contribution summary" }, 502);
   }
 });
 

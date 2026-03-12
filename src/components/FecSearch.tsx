@@ -44,6 +44,48 @@ interface ContributionSearchResponse {
   pagination?: ContributionPagination;
 }
 
+interface SummaryDonationPoint {
+  contribution_amount: number;
+  contributor_name: string | null;
+  contributor_employer: string | null;
+  contribution_date: string | null;
+  committee_name: string | null;
+}
+
+interface SummaryTopDonor {
+  donor_name: string;
+  donation_count: number;
+  total_donation_amount: number;
+  largest_single_donation: number;
+}
+
+interface CandidateContributionSummaryResponse {
+  candidate_id: string;
+  two_year_period: number;
+  summary: {
+    donation_count: number;
+    total_donation_amount: number;
+    average_donation_amount: number | null;
+    mean_donation_amount: number | null;
+    median_donation_amount: number | null;
+    largest_donation: SummaryDonationPoint | null;
+    smallest_donation: SummaryDonationPoint | null;
+    highest_donation_by_employer: {
+      employer: string;
+      contribution_amount: number;
+      contributor_name: string | null;
+      contribution_date: string | null;
+      committee_name: string | null;
+    } | null;
+  };
+  top_donors: {
+    top_5: SummaryTopDonor[];
+    top_10: SummaryTopDonor[];
+    top_20: SummaryTopDonor[];
+    selected_top_n: SummaryTopDonor[];
+  };
+}
+
 type SearchMode = "candidates" | "contributions";
 type DonationSort = "high_to_low" | "low_to_high";
 type ContributionCursor = Partial<
@@ -99,17 +141,15 @@ export function FecSearch() {
   const [electionYear, setElectionYear] = useState("");
   const [officeFilter, setOfficeFilter] = useState("");
   const [contributionsSort, setContributionsSort] = useState<DonationSort>("high_to_low");
-  const [candidateContributionsSort, setCandidateContributionsSort] =
-    useState<DonationSort>("high_to_low");
+  const [candidateTopN, setCandidateTopN] = useState<5 | 10 | 20>(10);
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
   const [contributionsPage, setContributionsPage] = useState(1);
   const [contributionsCursors, setContributionsCursors] = useState<Record<number, ContributionCursor | null>>({
     1: null,
   });
-  const [candidateContributionsPage, setCandidateContributionsPage] = useState(1);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
-  const candidateContributions = useApi<ContributionSearchResponse>();
+  const candidateSummary = useApi<CandidateContributionSummaryResponse>();
 
   const searchCandidates = () => {
     const params = new URLSearchParams({ limit: "20" });
@@ -165,19 +205,16 @@ export function FecSearch() {
 
   const handleCandidateClick = (c: CandidateResult) => {
     setSelectedCandidate(c);
-    setCandidateContributionsPage(1);
+    setCandidateTopN(10);
   };
 
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
-    const params = new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      page: String(candidateContributionsPage),
-      candidate_id: selectedCandidate.candidate_id,
-      sort: toApiAmountSort(candidateContributionsSort),
-    });
-    candidateContributions.fetchData(`/api/fec/contributions?${params.toString()}`);
-  }, [candidateContributionsPage, candidateContributionsSort, selectedCandidate?.candidate_id]);
+    const params = new URLSearchParams({ top_n: String(candidateTopN) });
+    candidateSummary.fetchData(
+      `/api/fec/candidates/${selectedCandidate.candidate_id}/summary?${params.toString()}`
+    );
+  }, [candidateTopN, selectedCandidate?.candidate_id]);
 
   useEffect(() => {
     if (mode !== "contributions") return;
@@ -212,8 +249,6 @@ export function FecSearch() {
   }, [mode, contributions.data?.pagination, contributionsPage]);
 
   const contributionResults = contributions.data?.results ?? [];
-  const candidateContributionResults = candidateContributions.data?.results ?? [];
-
   const contributionsAverage = useMemo(() => {
     if (!contributionResults.length) return null;
     const sum = contributionResults.reduce(
@@ -222,15 +257,6 @@ export function FecSearch() {
     );
     return sum / contributionResults.length;
   }, [contributionResults]);
-
-  const candidateContributionsAverage = useMemo(() => {
-    if (!candidateContributionResults.length) return null;
-    const sum = candidateContributionResults.reduce(
-      (acc, row) => acc + (row.contribution_receipt_amount ?? 0),
-      0
-    );
-    return sum / candidateContributionResults.length;
-  }, [candidateContributionResults]);
 
   const contributionsCurrentPage = contributions.data?.pagination?.page ?? contributionsPage;
   const contributionsTotalPages = contributions.data?.pagination?.pages ?? 1;
@@ -250,7 +276,7 @@ export function FecSearch() {
         {/* Mode toggle */}
         <div className="flex gap-2 mb-3">
           <button
-            onClick={() => { setMode("candidates"); setSelectedCandidate(null); setCandidateContributionsPage(1); }}
+            onClick={() => { setMode("candidates"); setSelectedCandidate(null); }}
             className={`btn ${mode === "candidates" ? "btn-primary" : "btn-ghost"}`}
           >
             Candidates
@@ -408,7 +434,7 @@ export function FecSearch() {
                       : ""}
                   </p>
                 </div>
-                <span className="text-xs text-vibe-dim shrink-0">View contributions →</span>
+                <span className="text-xs text-vibe-dim shrink-0">View summary →</span>
               </div>
             </button>
           ))}
@@ -441,81 +467,123 @@ export function FecSearch() {
             </div>
 
             <h4 className="text-sm font-semibold text-vibe-money uppercase tracking-wider mb-2">
-              Contributions to this candidate
+              Contribution summary
             </h4>
 
-            {candidateContributions.loading && <LoadingRows />}
+            {candidateSummary.loading && <LoadingRows />}
 
-            {candidateContributions.error && (
+            {candidateSummary.error && (
               <div className="px-3 py-2 bg-vibe-nay/10 rounded">
-                <p className="text-xs text-vibe-nay">{candidateContributions.error}</p>
+                <p className="text-xs text-vibe-nay">{candidateSummary.error}</p>
               </div>
             )}
 
-            {candidateContributions.data?.results &&
-              candidateContributions.data.results.length > 0 && (
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                    <p className="text-xs text-vibe-dim">
-                      Showing {candidateContributions.data.results.length} of{" "}
-                      {candidateContributions.data.pagination?.count ?? "?"} · Avg donation:{" "}
-                      <span className="text-vibe-money font-medium">
-                        ${candidateContributionsAverage?.toLocaleString(undefined, {
-                          maximumFractionDigits: 2,
-                        }) ?? "0"}
-                      </span>
+            {candidateSummary.data && (
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  <SummaryStat
+                    label="Donation count"
+                    value={candidateSummary.data.summary.donation_count.toLocaleString()}
+                  />
+                  <SummaryStat
+                    label="Largest donation"
+                    value={`$${candidateSummary.data.summary.largest_donation?.contribution_amount?.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    }) ?? "0"}`}
+                  />
+                  <SummaryStat
+                    label="Smallest donation"
+                    value={`$${candidateSummary.data.summary.smallest_donation?.contribution_amount?.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    }) ?? "0"}`}
+                  />
+                  <SummaryStat
+                    label="Average donation"
+                    value={`$${candidateSummary.data.summary.average_donation_amount?.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    }) ?? "0"}`}
+                  />
+                  <SummaryStat
+                    label="Mean donation"
+                    value={`$${candidateSummary.data.summary.mean_donation_amount?.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    }) ?? "0"}`}
+                  />
+                  <SummaryStat
+                    label="Median donation"
+                    value={`$${candidateSummary.data.summary.median_donation_amount?.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    }) ?? "0"}`}
+                  />
+                </div>
+
+                <div className="px-3 py-2 bg-vibe-surface rounded">
+                  <p className="text-xs text-vibe-dim uppercase tracking-wider mb-1">
+                    Highest donation by employer
+                  </p>
+                  {candidateSummary.data.summary.highest_donation_by_employer ? (
+                    <p className="text-sm">
+                      <span className="text-vibe-money font-semibold">
+                        $
+                        {candidateSummary.data.summary.highest_donation_by_employer.contribution_amount.toLocaleString()}
+                      </span>{" "}
+                      from {candidateSummary.data.summary.highest_donation_by_employer.employer}
+                      {candidateSummary.data.summary.highest_donation_by_employer.contributor_name
+                        ? ` (${candidateSummary.data.summary.highest_donation_by_employer.contributor_name})`
+                        : ""}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-vibe-dim">No employer data available.</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-vibe-dim uppercase tracking-wider">
+                      Top donors by total amount
                     </p>
                     <select
                       className="select text-xs py-1"
-                      value={candidateContributionsSort}
-                      onChange={(e) =>
-                        setCandidateContributionsSort(e.target.value as DonationSort)
-                      }
+                      value={candidateTopN}
+                      onChange={(e) => setCandidateTopN(Number(e.target.value) as 5 | 10 | 20)}
                     >
-                      <option value="high_to_low">Amount: High → Low</option>
-                      <option value="low_to_high">Amount: Low → High</option>
+                      <option value={5}>Top 5</option>
+                      <option value={10}>Top 10</option>
+                      <option value={20}>Top 20</option>
                     </select>
                   </div>
-                  <PaginationControls
-                    page={candidateContributions.data.pagination?.page ?? candidateContributionsPage}
-                    pages={candidateContributions.data.pagination?.pages ?? 1}
-                    onPageChange={setCandidateContributionsPage}
-                  />
-                  {candidateContributionResults.map((c, i) => (
-                    <div key={i} className="flex items-start justify-between gap-4 px-3 py-2 bg-vibe-surface rounded">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium truncate">{c.contributor_name}</p>
-                        <p className="text-xs text-vibe-dim truncate">
-                          {c.contributor_employer}
-                          {c.contributor_occupation
-                            ? ` | ${c.contributor_occupation}`
-                            : ""}
-                          {c.contributor_state ? ` | ${c.contributor_state}` : ""}
-                        </p>
-                        {c.committee?.name && (
-                          <p className="text-xs text-vibe-dim truncate">
-                            To: {c.committee.name}
-                          </p>
-                        )}
-                      </div>
-                      <div className="text-right shrink-0">
-                        <p className="text-sm font-bold text-vibe-money">
-                          ${c.contribution_receipt_amount?.toLocaleString() ?? "?"}
-                        </p>
+                  {candidateSummary.data.top_donors.selected_top_n.map((donor, i) => (
+                    <div key={i} className="flex items-start justify-between gap-3 px-3 py-2 bg-vibe-surface rounded">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{donor.donor_name}</p>
                         <p className="text-xs text-vibe-dim">
-                          {c.contribution_receipt_date}
+                          {donor.donation_count.toLocaleString()} donation(s) · largest single $
+                          {donor.largest_single_donation.toLocaleString(undefined, {
+                            maximumFractionDigits: 2,
+                          })}
                         </p>
                       </div>
+                      <p className="text-sm font-bold text-vibe-money">
+                        ${donor.total_donation_amount.toLocaleString(undefined, {
+                          maximumFractionDigits: 2,
+                        })}
+                      </p>
                     </div>
                   ))}
+                  {candidateSummary.data.top_donors.selected_top_n.length === 0 && (
+                    <p className="text-xs text-vibe-dim italic">No donor records available.</p>
+                  )}
                 </div>
-              )}
 
-            {!candidateContributions.loading &&
-              !candidateContributions.error &&
-              candidateContributions.data?.results?.length === 0 && (
+                <JsonViewer data={candidateSummary.data} label="Candidate Summary API" />
+              </div>
+            )}
+
+            {!candidateSummary.loading &&
+              !candidateSummary.error &&
+              candidateSummary.data?.summary.donation_count === 0 && (
                 <p className="text-xs text-vibe-dim italic">
-                  No individual contributions found for this candidate in the FEC database.
+                  No contribution records found for this candidate in the selected period.
                 </p>
               )}
           </div>
@@ -589,6 +657,15 @@ export function FecSearch() {
           <JsonViewer data={contributions.data} label="Full API Response" />
         </div>
       )}
+    </div>
+  );
+}
+
+function SummaryStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="px-3 py-2 bg-vibe-surface rounded">
+      <p className="text-xs text-vibe-dim uppercase tracking-wider">{label}</p>
+      <p className="text-sm font-semibold text-vibe-money">{value}</p>
     </div>
   );
 }
