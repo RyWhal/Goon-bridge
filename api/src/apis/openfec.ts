@@ -221,6 +221,7 @@ openfec.get("/contributions", async (c) => {
   const endpoint = "/schedules/schedule_a/";
 
   const candidateId = c.req.query("candidate_id");
+  let resolvedCommitteeId: string | null = null;
   if (candidateId) {
     const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
     if (!committeeIdForCandidate) {
@@ -232,6 +233,7 @@ openfec.get("/contributions", async (c) => {
         404
       );
     }
+    resolvedCommitteeId = committeeIdForCandidate;
     params["committee_id"] = committeeIdForCandidate;
     params["candidate_id"] = candidateId;
   }
@@ -330,7 +332,16 @@ openfec.get("/contributions", async (c) => {
       );
     }
 
-    return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
+    return c.json({
+      ...data,
+      query_context: {
+        candidate_id: candidateId ?? null,
+        resolved_committee_id: resolvedCommitteeId,
+        page: Number(params["page"] ?? "1"),
+        per_page: Number(params["per_page"] ?? "20"),
+        sort: params["sort"],
+      },
+    }, 200, { "Cache-Control": "no-store" });
   } catch {
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
   }
