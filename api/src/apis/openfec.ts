@@ -163,12 +163,12 @@ function defaultTwoYearPeriod(): string {
 function mapFecRowsToCacheRows(
   rows: FecContributionResult[],
   candidateId: string,
-  fallbackCommitteeId: string,
+  fallbackCommitteeId: string | null,
   twoYearPeriod: string
 ): CachedContributionRow[] {
   return rows.map((r) => ({
     candidate_id: candidateId,
-    committee_id: r.committee_id ?? fallbackCommitteeId,
+    committee_id: r.committee_id ?? fallbackCommitteeId ?? null,
     committee_name: r.committee?.name ?? null,
     contributor_name: r.contributor_name ?? null,
     contributor_employer: r.contributor_employer ?? null,
@@ -210,7 +210,7 @@ async function refreshCandidateContributionsCache(
   sb: ReturnType<typeof getSupabase>,
   apiKey: string,
   candidateId: string,
-  committeeId: string,
+  committeeId: string | null,
   twoYearPeriod: string
 ): Promise<number> {
   const allRows: CachedContributionRow[] = [];
@@ -220,15 +220,20 @@ async function refreshCandidateContributionsCache(
     refreshPage <= CANDIDATE_REFRESH_MAX_PAGES;
     refreshPage += 1
   ) {
-    const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, {
-      committee_id: committeeId,
+    const refreshParams: Record<string, string> = {
       candidate_id: candidateId,
       per_page: String(CANDIDATE_REFRESH_PER_PAGE),
       page: String(refreshPage),
       sort: "-contribution_receipt_date",
       is_individual: "true",
       two_year_transaction_period: twoYearPeriod,
-    });
+    };
+
+    if (committeeId) {
+      refreshParams["committee_id"] = committeeId;
+    }
+
+    const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, refreshParams);
 
     if (!refreshResp.ok) {
       const upstreamDetail = await readFecErrorDetails(refreshResp);
@@ -375,9 +380,11 @@ openfec.get("/contributions", async (c) => {
         ? "contribution_receipt_date"
         : "-contribution_receipt_date";
 
+  const requestedPage = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
+  const requestedPerPage = Math.max(1, Math.min(Number(c.req.query("limit") ?? "20") || 20, 100));
+
   const params: Record<string, string> = {
-    per_page: c.req.query("limit") ?? "20",
-    page: c.req.query("page") ?? "1",
+    per_page: String(requestedPerPage),
     sort,
     is_individual: "true",
   };
@@ -390,7 +397,7 @@ openfec.get("/contributions", async (c) => {
   if (candidateId && hasSupabase(c.env)) {
     const sb = getSupabase(c.env);
     const limit = Math.max(1, Math.min(Number(params.per_page) || 20, 100));
-    const page = Math.max(1, Number(params.page) || 1);
+    const page = requestedPage;
     const ascending = sort === "contribution_receipt_amount" || sort === "contribution_receipt_date";
     const sortColumn = sort.includes("amount") ? "contribution_amount" : "contribution_date";
     const from = (page - 1) * limit;
@@ -437,10 +444,6 @@ openfec.get("/contributions", async (c) => {
             try {
               const refreshSb = getSupabase(c.env);
               const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-              if (!committeeId) {
-                console.warn(`Skipping contribution refresh for ${candidateId}: no committee found`);
-                return;
-              }
 
               await refreshCandidateContributionsCache(
                 refreshSb,
@@ -476,23 +479,21 @@ openfec.get("/contributions", async (c) => {
     }
 
     const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-    if (!committeeId) {
-      return c.json({
-        error: `No authorized committee found for candidate ${candidateId}`,
-        query: { candidate_id: candidateId },
-      }, 404);
-    }
 
     try {
-      const liveResp = await fecFetch("/schedules/schedule_a/", apiKey, {
-        committee_id: committeeId,
+      const liveParams: Record<string, string> = {
         candidate_id: candidateId,
         per_page: String(limit),
         page: String(page),
         sort,
         is_individual: "true",
         two_year_transaction_period: twoYearPeriod,
-      });
+      };
+      if (committeeId) {
+        liveParams["committee_id"] = committeeId;
+      }
+
+      const liveResp = await fecFetch("/schedules/schedule_a/", apiKey, liveParams);
 
       if (!liveResp.ok) {
         const upstreamDetail = await readFecErrorDetails(liveResp);
@@ -512,7 +513,12 @@ openfec.get("/contributions", async (c) => {
 
       const liveData = (await liveResp.json()) as {
         results?: FecContributionResult[];
-        pagination?: { count?: number; page?: number; pages?: number };
+        pagination?: { count?: number; page?: number; pages?: number; last_indexes?: Record<string, string | number> };
+      };
+
+      const normalizedLivePagination = {
+        ...(liveData.pagination ?? {}),
+        page,
       };
 
       c.executionCtx.waitUntil(
@@ -534,10 +540,11 @@ openfec.get("/contributions", async (c) => {
 
       return c.json({
         ...liveData,
+        pagination: normalizedLivePagination,
         query_context: {
           source: "openfec_live",
           candidate_id: candidateId,
-          resolved_committee_id: committeeId,
+          resolved_committee_id: committeeId ?? null,
           page,
           per_page: limit,
           sort,
@@ -558,15 +565,11 @@ openfec.get("/contributions", async (c) => {
   const endpoint = "/schedules/schedule_a/";
 
   if (candidateId) {
-    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
-    if (!committeeIdForCandidate) {
-      return c.json({
-        error: `No authorized committee found for candidate ${candidateId}`,
-        query: { candidate_id: candidateId },
-      }, 404);
-    }
-    params["committee_id"] = committeeIdForCandidate;
     params["candidate_id"] = candidateId;
+    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
+    if (committeeIdForCandidate) {
+      params["committee_id"] = committeeIdForCandidate;
+    }
   }
 
   const committeeId = c.req.query("committee_id");
@@ -592,6 +595,18 @@ openfec.get("/contributions", async (c) => {
 
   const state = c.req.query("state");
   if (state) params["contributor_state"] = state;
+
+  // OpenFEC schedule_a uses keyset pagination via `last_indexes`.
+  const cursorKeys = [
+    "last_index",
+    "last_contribution_receipt_amount",
+    "last_contribution_receipt_date",
+    "sort_null_only",
+  ] as const;
+  for (const key of cursorKeys) {
+    const value = c.req.query(key);
+    if (value) params[key] = value;
+  }
 
   try {
     let resp: Response;
@@ -621,7 +636,17 @@ openfec.get("/contributions", async (c) => {
       const upstreamDetail = await readFecErrorDetails(resp);
       const debugParams = Object.fromEntries(
         Object.entries(params).filter(([key]) =>
-          ["candidate_id", "committee_id", "page", "per_page", "sort", "two_year_transaction_period"].includes(key)
+          [
+            "candidate_id",
+            "committee_id",
+            "per_page",
+            "sort",
+            "two_year_transaction_period",
+            "last_index",
+            "last_contribution_receipt_amount",
+            "last_contribution_receipt_date",
+            "sort_null_only",
+          ].includes(key)
         )
       );
 
@@ -658,6 +683,22 @@ openfec.get("/contributions", async (c) => {
         two_year_transaction_period?: number;
         [key: string]: unknown;
       }>;
+      pagination?: {
+        count?: number;
+        page?: number;
+        pages?: number;
+        last_indexes?: Record<string, string | number>;
+      };
+    };
+
+    const normalizedPagination = {
+      ...(data.pagination ?? {}),
+      page: requestedPage,
+      pages: data.pagination?.pages ?? (
+        data.pagination?.count && requestedPerPage > 0
+          ? Math.max(1, Math.ceil(data.pagination.count / requestedPerPage))
+          : undefined
+      ),
     };
 
     // Cache contributions to Supabase in the background
@@ -684,15 +725,17 @@ openfec.get("/contributions", async (c) => {
 
     return c.json({
       ...data,
+      pagination: normalizedPagination,
       query_context: {
         source: "openfec_live",
         candidate_id: candidateId ?? null,
         committee_id: params["committee_id"] ?? null,
-        page: Number(params["page"] ?? "1"),
-        per_page: Number(params["per_page"] ?? "20"),
+        page: requestedPage,
+        per_page: requestedPerPage,
         sort_requested: sort,
         sort_applied: sortApplied,
         fallback_sort_applied: fallbackSortApplied,
+        next_cursor: data.pagination?.last_indexes ?? null,
       },
     }, 200, { "Cache-Control": "no-store" });
   } catch (error) {

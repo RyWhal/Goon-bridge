@@ -20,6 +20,13 @@ interface CandidateSearchResponse {
   pagination?: { pages?: number; count?: number; page?: number };
 }
 
+interface ContributionPagination {
+  pages?: number;
+  count?: number;
+  page?: number;
+  last_indexes?: Record<string, string | number>;
+}
+
 interface ContributionResult {
   contributor_name?: string;
   contributor_employer?: string;
@@ -34,11 +41,20 @@ interface ContributionResult {
 
 interface ContributionSearchResponse {
   results?: ContributionResult[];
-  pagination?: { pages?: number; count?: number; page?: number };
+  pagination?: ContributionPagination;
 }
 
 type SearchMode = "candidates" | "contributions";
 type DonationSort = "high_to_low" | "low_to_high";
+type ContributionCursor = Partial<
+  Pick<
+    Record<string, string>,
+    | "last_index"
+    | "last_contribution_receipt_amount"
+    | "last_contribution_receipt_date"
+    | "sort_null_only"
+  >
+>;
 
 function toApiAmountSort(sort: DonationSort): string {
   return sort === "high_to_low" ? "amount_desc" : "amount_asc";
@@ -53,6 +69,24 @@ const OFFICE_OPTIONS = [
 ];
 
 const PAGE_SIZE = 20;
+
+function cursorFromLastIndexes(
+  lastIndexes?: Record<string, string | number>
+): ContributionCursor | null {
+  if (!lastIndexes) return null;
+
+  const cursor: ContributionCursor = {};
+  if (lastIndexes.last_index != null) cursor.last_index = String(lastIndexes.last_index);
+  if (lastIndexes.last_contribution_receipt_amount != null) {
+    cursor.last_contribution_receipt_amount = String(lastIndexes.last_contribution_receipt_amount);
+  }
+  if (lastIndexes.last_contribution_receipt_date != null) {
+    cursor.last_contribution_receipt_date = String(lastIndexes.last_contribution_receipt_date);
+  }
+  if (lastIndexes.sort_null_only != null) cursor.sort_null_only = String(lastIndexes.sort_null_only);
+
+  return Object.keys(cursor).length ? cursor : null;
+}
 
 export function FecSearch() {
   const [mode, setMode] = useState<SearchMode>("candidates");
@@ -69,6 +103,9 @@ export function FecSearch() {
     useState<DonationSort>("high_to_low");
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
   const [contributionsPage, setContributionsPage] = useState(1);
+  const [contributionsCursors, setContributionsCursors] = useState<Record<number, ContributionCursor | null>>({
+    1: null,
+  });
   const [candidateContributionsPage, setCandidateContributionsPage] = useState(1);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
@@ -85,12 +122,34 @@ export function FecSearch() {
   };
 
   const fetchContributionsPage = (page: number) => {
+    let cursor = page > 1 ? contributionsCursors[page] ?? null : null;
+
+    // If we're moving forward one page and haven't stored the cursor yet,
+    // use the current response's last_indexes directly.
+    if (
+      !cursor &&
+      page > 1 &&
+      contributions.data?.pagination?.page === page - 1
+    ) {
+      cursor = cursorFromLastIndexes(contributions.data.pagination.last_indexes);
+    }
+
+    if (page > 1 && !cursor) return;
+
     setContributionsPage(page);
     const params = new URLSearchParams({
       limit: String(PAGE_SIZE),
       page: String(page),
       sort: toApiAmountSort(contributionsSort),
     });
+    if (cursor?.last_index) params.set("last_index", cursor.last_index);
+    if (cursor?.last_contribution_receipt_amount) {
+      params.set("last_contribution_receipt_amount", cursor.last_contribution_receipt_amount);
+    }
+    if (cursor?.last_contribution_receipt_date) {
+      params.set("last_contribution_receipt_date", cursor.last_contribution_receipt_date);
+    }
+    if (cursor?.sort_null_only) params.set("sort_null_only", cursor.sort_null_only);
     if (employer) params.set("employer", employer);
     if (contributorName) params.set("contributor_name", contributorName);
     if (minAmount) params.set("min_amount", minAmount);
@@ -100,6 +159,7 @@ export function FecSearch() {
   };
 
   const searchContributions = () => {
+    setContributionsCursors({ 1: null });
     fetchContributionsPage(1);
   };
 
@@ -122,47 +182,63 @@ export function FecSearch() {
   useEffect(() => {
     if (mode !== "contributions") return;
     if (!contributions.data?.results) return;
+    setContributionsCursors({ 1: null });
     fetchContributionsPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contributionsSort]);
 
-  const sortedContributionResults = useMemo(() => {
-    const rows = contributions.data?.results ?? [];
-    return [...rows].sort((a, b) => {
-      const aAmount = a.contribution_receipt_amount ?? 0;
-      const bAmount = b.contribution_receipt_amount ?? 0;
-      return contributionsSort === "high_to_low" ? bAmount - aAmount : aAmount - bAmount;
-    });
-  }, [contributions.data?.results, contributionsSort]);
+  useEffect(() => {
+    if (mode !== "contributions") return;
 
-  const sortedCandidateContributionResults = useMemo(() => {
-    const rows = candidateContributions.data?.results ?? [];
-    return [...rows].sort((a, b) => {
-      const aAmount = a.contribution_receipt_amount ?? 0;
-      const bAmount = b.contribution_receipt_amount ?? 0;
-      return candidateContributionsSort === "high_to_low"
-        ? bAmount - aAmount
-        : aAmount - bAmount;
+    const page = contributions.data?.pagination?.page ?? contributionsPage;
+    const nextCursor = cursorFromLastIndexes(contributions.data?.pagination?.last_indexes);
+    if (!nextCursor) return;
+
+    setContributionsCursors((prev) => {
+      const nextPage = page + 1;
+      const existing = prev[nextPage];
+      const unchanged =
+        existing &&
+        existing.last_index === nextCursor.last_index &&
+        existing.last_contribution_receipt_amount ===
+          nextCursor.last_contribution_receipt_amount &&
+        existing.last_contribution_receipt_date ===
+          nextCursor.last_contribution_receipt_date &&
+        existing.sort_null_only === nextCursor.sort_null_only;
+      if (unchanged) return prev;
+
+      return { ...prev, [nextPage]: nextCursor };
     });
-  }, [candidateContributions.data?.results, candidateContributionsSort]);
+  }, [mode, contributions.data?.pagination, contributionsPage]);
+
+  const contributionResults = contributions.data?.results ?? [];
+  const candidateContributionResults = candidateContributions.data?.results ?? [];
 
   const contributionsAverage = useMemo(() => {
-    if (!sortedContributionResults.length) return null;
-    const sum = sortedContributionResults.reduce(
+    if (!contributionResults.length) return null;
+    const sum = contributionResults.reduce(
       (acc, row) => acc + (row.contribution_receipt_amount ?? 0),
       0
     );
-    return sum / sortedContributionResults.length;
-  }, [sortedContributionResults]);
+    return sum / contributionResults.length;
+  }, [contributionResults]);
 
   const candidateContributionsAverage = useMemo(() => {
-    if (!sortedCandidateContributionResults.length) return null;
-    const sum = sortedCandidateContributionResults.reduce(
+    if (!candidateContributionResults.length) return null;
+    const sum = candidateContributionResults.reduce(
       (acc, row) => acc + (row.contribution_receipt_amount ?? 0),
       0
     );
-    return sum / sortedCandidateContributionResults.length;
-  }, [sortedCandidateContributionResults]);
+    return sum / candidateContributionResults.length;
+  }, [candidateContributionResults]);
+
+  const contributionsCurrentPage = contributions.data?.pagination?.page ?? contributionsPage;
+  const contributionsTotalPages = contributions.data?.pagination?.pages ?? 1;
+  const contributionsNextCursor =
+    contributionsCursors[contributionsCurrentPage + 1] ??
+    cursorFromLastIndexes(contributions.data?.pagination?.last_indexes);
+  const contributionsNextDisabled =
+    contributionsCurrentPage >= contributionsTotalPages || !contributionsNextCursor;
 
   return (
     <div className="space-y-4">
@@ -180,7 +256,11 @@ export function FecSearch() {
             Candidates
           </button>
           <button
-            onClick={() => { setMode("contributions"); setContributionsPage(1); }}
+            onClick={() => {
+              setMode("contributions");
+              setContributionsPage(1);
+              setContributionsCursors({ 1: null });
+            }}
             className={`btn ${mode === "contributions" ? "btn-primary" : "btn-ghost"}`}
           >
             Contributions
@@ -401,7 +481,7 @@ export function FecSearch() {
                     pages={candidateContributions.data.pagination?.pages ?? 1}
                     onPageChange={setCandidateContributionsPage}
                   />
-                  {sortedCandidateContributionResults.map((c, i) => (
+                  {candidateContributionResults.map((c, i) => (
                     <div key={i} className="flex items-start justify-between gap-4 px-3 py-2 bg-vibe-surface rounded">
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium truncate">{c.contributor_name}</p>
@@ -471,11 +551,12 @@ export function FecSearch() {
             </select>
           </div>
           <PaginationControls
-            page={contributions.data.pagination?.page ?? contributionsPage}
-            pages={contributions.data.pagination?.pages ?? 1}
+            page={contributionsCurrentPage}
+            pages={contributionsTotalPages}
             onPageChange={fetchContributionsPage}
+            disableNext={contributionsNextDisabled}
           />
-          {sortedContributionResults.map((c, i) => (
+          {contributionResults.map((c, i) => (
             <div key={i} className="card">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
@@ -516,10 +597,12 @@ function PaginationControls({
   page,
   pages,
   onPageChange,
+  disableNext,
 }: {
   page: number;
   pages: number;
   onPageChange: (page: number) => void;
+  disableNext?: boolean;
 }) {
   if (!pages || pages <= 1) return null;
 
@@ -537,7 +620,7 @@ function PaginationControls({
       </p>
       <button
         className="btn btn-ghost text-xs"
-        disabled={page >= pages}
+        disabled={disableNext ?? page >= pages}
         onClick={() => onPageChange(page + 1)}
       >
         Next →
