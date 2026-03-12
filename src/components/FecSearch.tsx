@@ -52,7 +52,7 @@ const OFFICE_OPTIONS = [
   { value: "P", label: "President" },
 ];
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 export function FecSearch() {
   const [mode, setMode] = useState<SearchMode>("candidates");

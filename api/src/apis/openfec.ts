@@ -5,6 +5,43 @@ import { getSupabase } from "../lib/supabase";
 const openfec = new Hono<Env>();
 
 const BASE = "https://api.open.fec.gov/v1";
+const FEC_FETCH_TIMEOUT_MS = 12_000;
+const CONTRIBUTIONS_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+const CANDIDATE_REFRESH_PER_PAGE = 100;
+const CANDIDATE_REFRESH_MAX_PAGES = 100;
+
+class FecTimeoutError extends Error {
+  constructor(message = "OpenFEC request timed out") {
+    super(message);
+    this.name = "FecTimeoutError";
+  }
+}
+
+interface FecContributionResult {
+  candidate_id?: string;
+  committee_id?: string;
+  committee?: { name?: string };
+  contributor_name?: string;
+  contributor_employer?: string;
+  contributor_occupation?: string;
+  contributor_state?: string;
+  contribution_receipt_amount?: number;
+  contribution_receipt_date?: string;
+  two_year_transaction_period?: number;
+}
+
+interface CachedContributionRow {
+  candidate_id: string | null;
+  committee_id: string | null;
+  committee_name: string | null;
+  contributor_name: string | null;
+  contributor_employer: string | null;
+  contributor_occupation: string | null;
+  contributor_state: string | null;
+  contribution_amount: number | null;
+  contribution_date: string | null;
+  two_year_period: number | null;
+}
 
 function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
@@ -22,7 +59,20 @@ async function fecFetch(
       url.searchParams.set(k, v);
     }
   }
-  return fetch(url.toString());
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FEC_FETCH_TIMEOUT_MS);
+
+  try {
+    return await fetch(url.toString(), { signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new FecTimeoutError(`OpenFEC request timed out after ${FEC_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 
@@ -108,6 +158,120 @@ function defaultTwoYearPeriod(): string {
   const year = now.getUTCFullYear();
   const evenYear = year % 2 === 0 ? year : year + 1;
   return String(evenYear);
+}
+
+function mapFecRowsToCacheRows(
+  rows: FecContributionResult[],
+  candidateId: string,
+  fallbackCommitteeId: string,
+  twoYearPeriod: string
+): CachedContributionRow[] {
+  return rows.map((r) => ({
+    candidate_id: candidateId,
+    committee_id: r.committee_id ?? fallbackCommitteeId,
+    committee_name: r.committee?.name ?? null,
+    contributor_name: r.contributor_name ?? null,
+    contributor_employer: r.contributor_employer ?? null,
+    contributor_occupation: r.contributor_occupation ?? null,
+    contributor_state: r.contributor_state ?? null,
+    contribution_amount: r.contribution_receipt_amount ?? null,
+    contribution_date: r.contribution_receipt_date ?? null,
+    two_year_period: r.two_year_transaction_period ?? Number(twoYearPeriod),
+  }));
+}
+
+function mapCachedRowsToApiRows(rows: Array<{
+  candidate_id: string | null;
+  committee_id: string | null;
+  committee_name: string | null;
+  contributor_name: string | null;
+  contributor_employer: string | null;
+  contributor_occupation: string | null;
+  contributor_state: string | null;
+  contribution_amount: number | null;
+  contribution_date: string | null;
+  two_year_period: number | null;
+}>): FecContributionResult[] {
+  return rows.map((r) => ({
+    candidate_id: r.candidate_id ?? undefined,
+    committee_id: r.committee_id ?? undefined,
+    committee: { name: r.committee_name ?? undefined },
+    contributor_name: r.contributor_name ?? undefined,
+    contributor_employer: r.contributor_employer ?? undefined,
+    contributor_occupation: r.contributor_occupation ?? undefined,
+    contributor_state: r.contributor_state ?? undefined,
+    contribution_receipt_amount: r.contribution_amount ?? undefined,
+    contribution_receipt_date: r.contribution_date ?? undefined,
+    two_year_transaction_period: r.two_year_period ?? undefined,
+  }));
+}
+
+async function refreshCandidateContributionsCache(
+  sb: ReturnType<typeof getSupabase>,
+  apiKey: string,
+  candidateId: string,
+  committeeId: string,
+  twoYearPeriod: string
+): Promise<number> {
+  const allRows: CachedContributionRow[] = [];
+
+  for (
+    let refreshPage = 1;
+    refreshPage <= CANDIDATE_REFRESH_MAX_PAGES;
+    refreshPage += 1
+  ) {
+    const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, {
+      committee_id: committeeId,
+      candidate_id: candidateId,
+      per_page: String(CANDIDATE_REFRESH_PER_PAGE),
+      page: String(refreshPage),
+      sort: "-contribution_receipt_date",
+      is_individual: "true",
+      two_year_transaction_period: twoYearPeriod,
+    });
+
+    if (!refreshResp.ok) {
+      const upstreamDetail = await readFecErrorDetails(refreshResp);
+      throw new Error(
+        `OpenFEC refresh failed (${refreshResp.status})${upstreamDetail ? `: ${upstreamDetail}` : ""}`
+      );
+    }
+
+    const refreshData = (await refreshResp.json()) as {
+      results?: FecContributionResult[];
+      pagination?: { pages?: number };
+    };
+
+    const rows = refreshData.results ?? [];
+    if (rows.length === 0) break;
+
+    allRows.push(...mapFecRowsToCacheRows(rows, candidateId, committeeId, twoYearPeriod));
+
+    const pages = refreshData.pagination?.pages ?? refreshPage;
+    if (refreshPage >= pages) break;
+  }
+
+  const { error: deleteError } = await sb
+    .from("contributions")
+    .delete()
+    .eq("candidate_id", candidateId);
+
+  if (deleteError) {
+    throw new Error(`Failed to clear cached contributions: ${deleteError.message}`);
+  }
+
+  if (allRows.length > 0) {
+    const chunkSize = 1000;
+    for (let i = 0; i < allRows.length; i += chunkSize) {
+      const chunk = allRows.slice(i, i + chunkSize);
+      const { error: insertError } = await sb.from("contributions").insert(chunk);
+      if (insertError) {
+        throw new Error(`Failed to cache contributions: ${insertError.message}`);
+      }
+    }
+  }
+
+  return allRows.length;
 }
 
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
@@ -227,176 +391,168 @@ openfec.get("/contributions", async (c) => {
     const sb = getSupabase(c.env);
     const limit = Math.max(1, Math.min(Number(params.per_page) || 20, 100));
     const page = Math.max(1, Number(params.page) || 1);
-
-    const { data: latestRow } = await sb
-      .from("contributions")
-      .select("updated_at")
-      .eq("candidate_id", candidateId)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const latestUpdatedAt = latestRow?.updated_at ? new Date(latestRow.updated_at) : null;
-    const isStale = !latestUpdatedAt || (Date.now() - latestUpdatedAt.getTime()) > 24 * 60 * 60 * 1000;
-
-    let resolvedCommitteeId: string | null = null;
-
-    if (isStale) {
-      const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
-      if (!committeeId) {
-        return c.json({
-          error: `No authorized committee found for candidate ${candidateId}`,
-          query: { candidate_id: candidateId },
-        }, 404);
-      }
-      resolvedCommitteeId = committeeId;
-
-      const allRows: Array<{
-        candidate_id: string;
-        committee_id: string | null;
-        committee_name: string | null;
-        contributor_name: string | null;
-        contributor_employer: string | null;
-        contributor_occupation: string | null;
-        contributor_state: string | null;
-        contribution_amount: number | null;
-        contribution_date: string | null;
-        two_year_period: number | null;
-      }> = [];
-
-      const refreshPerPage = 100;
-      const maxRefreshPages = 100;
-      for (let refreshPage = 1; refreshPage <= maxRefreshPages; refreshPage += 1) {
-        const refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, {
-          committee_id: committeeId,
-          candidate_id: candidateId,
-          per_page: String(refreshPerPage),
-          page: String(refreshPage),
-          sort: "-contribution_receipt_date",
-          is_individual: "true",
-          two_year_transaction_period: twoYearPeriod,
-        });
-
-        if (!refreshResp.ok) {
-          const upstreamDetail = await readFecErrorDetails(refreshResp);
-          return c.json({
-            error: `FEC API ${refreshResp.status}${upstreamDetail ? `: ${upstreamDetail}` : ""}`,
-            detail: upstreamDetail,
-            query: {
-              candidate_id: candidateId,
-              committee_id: committeeId,
-              page: refreshPage,
-              per_page: refreshPerPage,
-              two_year_transaction_period: twoYearPeriod,
-            },
-          }, 502);
-        }
-
-        const refreshData = (await refreshResp.json()) as {
-          results?: Array<{
-            committee_id?: string;
-            committee?: { name?: string };
-            contributor_name?: string;
-            contributor_employer?: string;
-            contributor_occupation?: string;
-            contributor_state?: string;
-            contribution_receipt_amount?: number;
-            contribution_receipt_date?: string;
-            two_year_transaction_period?: number;
-          }>;
-          pagination?: { pages?: number };
-        };
-
-        const rows = refreshData.results ?? [];
-        if (rows.length === 0) break;
-
-        allRows.push(
-          ...rows.map((r) => ({
-            candidate_id: candidateId,
-            committee_id: r.committee_id ?? committeeId,
-            committee_name: r.committee?.name ?? null,
-            contributor_name: r.contributor_name ?? null,
-            contributor_employer: r.contributor_employer ?? null,
-            contributor_occupation: r.contributor_occupation ?? null,
-            contributor_state: r.contributor_state ?? null,
-            contribution_amount: r.contribution_receipt_amount ?? null,
-            contribution_date: r.contribution_receipt_date ?? null,
-            two_year_period: r.two_year_transaction_period ?? Number(twoYearPeriod),
-          }))
-        );
-
-        const pages = refreshData.pagination?.pages ?? refreshPage;
-        if (refreshPage >= pages) break;
-      }
-
-      const { error: deleteError } = await sb
-        .from("contributions")
-        .delete()
-        .eq("candidate_id", candidateId);
-
-      if (deleteError) {
-        return c.json({ error: `Failed to clear cached contributions: ${deleteError.message}` }, 500);
-      }
-
-      if (allRows.length > 0) {
-        const chunkSize = 1000;
-        for (let i = 0; i < allRows.length; i += chunkSize) {
-          const chunk = allRows.slice(i, i + chunkSize);
-          const { error: insertError } = await sb.from("contributions").insert(chunk);
-          if (insertError) {
-            return c.json({ error: `Failed to cache contributions: ${insertError.message}` }, 500);
-          }
-        }
-      }
-    }
-
     const ascending = sort === "contribution_receipt_amount" || sort === "contribution_receipt_date";
     const sortColumn = sort.includes("amount") ? "contribution_amount" : "contribution_date";
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
-    const { data: cachedRows, count, error: queryError } = await sb
-      .from("contributions")
-      .select("candidate_id, committee_id, committee_name, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
-      .eq("candidate_id", candidateId)
-      .order(sortColumn, { ascending, nullsFirst: false })
-      .range(from, to);
+    const [{ data: latestRow, error: latestError }, { data: cachedRows, count, error: queryError }] =
+      await Promise.all([
+        sb
+          .from("contributions")
+          .select("updated_at")
+          .eq("candidate_id", candidateId)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        sb
+          .from("contributions")
+          .select("candidate_id, committee_id, committee_name, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
+          .eq("candidate_id", candidateId)
+          .order(sortColumn, { ascending, nullsFirst: false })
+          .range(from, to),
+      ]);
 
     if (queryError) {
       return c.json({ error: `Failed to query cached contributions: ${queryError.message}` }, 500);
     }
 
+    if (latestError) {
+      console.warn(`Unable to read contribution freshness for ${candidateId}: ${latestError.message}`);
+    }
+
+    const latestUpdatedAt = latestRow?.updated_at ? new Date(latestRow.updated_at) : null;
+    const isStale =
+      !latestUpdatedAt ||
+      Number.isNaN(latestUpdatedAt.getTime()) ||
+      Date.now() - latestUpdatedAt.getTime() > CONTRIBUTIONS_CACHE_STALE_MS;
+    const hasCachedRows = (cachedRows?.length ?? 0) > 0;
     const totalCount = count ?? 0;
     const pages = limit > 0 ? Math.max(1, Math.ceil(totalCount / limit)) : 1;
 
-    return c.json({
-      results: (cachedRows ?? []).map((r) => ({
-        candidate_id: r.candidate_id ?? candidateId,
-        committee_id: r.committee_id ?? undefined,
-        committee: { name: r.committee_name ?? undefined },
-        contributor_name: r.contributor_name ?? undefined,
-        contributor_employer: r.contributor_employer ?? undefined,
-        contributor_occupation: r.contributor_occupation ?? undefined,
-        contributor_state: r.contributor_state ?? undefined,
-        contribution_receipt_amount: r.contribution_amount ?? undefined,
-        contribution_receipt_date: r.contribution_date ?? undefined,
-        two_year_transaction_period: r.two_year_period ?? undefined,
-      })),
-      pagination: {
-        count: totalCount,
-        page,
-        pages,
-      },
-      query_context: {
-        source: "supabase_cache",
+    if (hasCachedRows) {
+      if (isStale) {
+        c.executionCtx.waitUntil(
+          (async () => {
+            try {
+              const refreshSb = getSupabase(c.env);
+              const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+              if (!committeeId) {
+                console.warn(`Skipping contribution refresh for ${candidateId}: no committee found`);
+                return;
+              }
+
+              await refreshCandidateContributionsCache(
+                refreshSb,
+                apiKey,
+                candidateId,
+                committeeId,
+                twoYearPeriod
+              );
+            } catch (error) {
+              console.error(`Background contribution refresh failed for ${candidateId}`, error);
+            }
+          })()
+        );
+      }
+
+      return c.json({
+        results: mapCachedRowsToApiRows(cachedRows ?? []),
+        pagination: {
+          count: totalCount,
+          page,
+          pages,
+        },
+        query_context: {
+          source: "supabase_cache",
+          candidate_id: candidateId,
+          page,
+          per_page: limit,
+          sort,
+          stale: isStale,
+          refresh_queued: isStale,
+        },
+      }, 200, { "Cache-Control": "public, max-age=300" });
+    }
+
+    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+    if (!committeeId) {
+      return c.json({
+        error: `No authorized committee found for candidate ${candidateId}`,
+        query: { candidate_id: candidateId },
+      }, 404);
+    }
+
+    try {
+      const liveResp = await fecFetch("/schedules/schedule_a/", apiKey, {
+        committee_id: committeeId,
         candidate_id: candidateId,
-        resolved_committee_id: resolvedCommitteeId,
-        page,
-        per_page: limit,
+        per_page: String(limit),
+        page: String(page),
         sort,
-        refreshed: isStale,
-      },
-    }, 200, { "Cache-Control": "public, max-age=3600" });
+        is_individual: "true",
+        two_year_transaction_period: twoYearPeriod,
+      });
+
+      if (!liveResp.ok) {
+        const upstreamDetail = await readFecErrorDetails(liveResp);
+        return c.json({
+          error: `FEC API ${liveResp.status}${upstreamDetail ? `: ${upstreamDetail}` : ""}`,
+          detail: upstreamDetail,
+          query: {
+            candidate_id: candidateId,
+            committee_id: committeeId,
+            page,
+            per_page: limit,
+            sort,
+            two_year_transaction_period: twoYearPeriod,
+          },
+        }, 502);
+      }
+
+      const liveData = (await liveResp.json()) as {
+        results?: FecContributionResult[];
+        pagination?: { count?: number; page?: number; pages?: number };
+      };
+
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const refreshSb = getSupabase(c.env);
+            await refreshCandidateContributionsCache(
+              refreshSb,
+              apiKey,
+              candidateId,
+              committeeId,
+              twoYearPeriod
+            );
+          } catch (error) {
+            console.error(`Failed to warm contribution cache for ${candidateId}`, error);
+          }
+        })()
+      );
+
+      return c.json({
+        ...liveData,
+        query_context: {
+          source: "openfec_live",
+          candidate_id: candidateId,
+          resolved_committee_id: committeeId,
+          page,
+          per_page: limit,
+          sort,
+          cache_refresh_queued: true,
+        },
+      }, 200, { "Cache-Control": "no-store" });
+    } catch (error) {
+      if (error instanceof FecTimeoutError) {
+        return c.json({
+          error: "OpenFEC request timed out",
+          detail: "Candidate contribution lookup took too long; try again shortly.",
+        }, 504);
+      }
+      return c.json({ error: "Failed to fetch from FEC API" }, 502);
+    }
   }
 
   const endpoint = "/schedules/schedule_a/";
@@ -438,7 +594,29 @@ openfec.get("/contributions", async (c) => {
   if (state) params["contributor_state"] = state;
 
   try {
-    const resp = await fecFetch(endpoint, apiKey, params);
+    let resp: Response;
+    let sortApplied = params["sort"];
+    let fallbackSortApplied = false;
+
+    try {
+      resp = await fecFetch(endpoint, apiKey, params);
+    } catch (error) {
+      const shouldRetryWithDateSort =
+        error instanceof FecTimeoutError &&
+        !candidateId &&
+        !committeeId &&
+        sortApplied.includes("contribution_receipt_amount");
+
+      if (!shouldRetryWithDateSort) {
+        throw error;
+      }
+
+      params["sort"] = "-contribution_receipt_date";
+      sortApplied = params["sort"];
+      fallbackSortApplied = true;
+      resp = await fecFetch(endpoint, apiKey, params);
+    }
+
     if (!resp.ok) {
       const upstreamDetail = await readFecErrorDetails(resp);
       const debugParams = Object.fromEntries(
@@ -512,10 +690,18 @@ openfec.get("/contributions", async (c) => {
         committee_id: params["committee_id"] ?? null,
         page: Number(params["page"] ?? "1"),
         per_page: Number(params["per_page"] ?? "20"),
-        sort: params["sort"],
+        sort_requested: sort,
+        sort_applied: sortApplied,
+        fallback_sort_applied: fallbackSortApplied,
       },
     }, 200, { "Cache-Control": "no-store" });
-  } catch {
+  } catch (error) {
+    if (error instanceof FecTimeoutError) {
+      return c.json({
+        error: "OpenFEC request timed out",
+        detail: "The contribution search took too long. Try narrowing filters or retry shortly.",
+      }, 504);
+    }
     return c.json({ error: "Failed to fetch from FEC API" }, 502);
   }
 });

@@ -22,6 +22,8 @@ function jsonError(error: string, detail?: string, upstreamStatus?: number): Res
   );
 }
 
+const UPSTREAM_TIMEOUT_MS = 20_000;
+
 export const onRequest: PagesFunction = async (context) => {
   const url = new URL(context.request.url);
   const target = new URL(
@@ -34,7 +36,11 @@ export const onRequest: PagesFunction = async (context) => {
   headers.delete("host");
 
   let resp: Response;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+
     resp = await fetch(target.toString(), {
       method: context.request.method,
       headers,
@@ -42,12 +48,22 @@ export const onRequest: PagesFunction = async (context) => {
         context.request.method !== "GET" && context.request.method !== "HEAD"
           ? context.request.body
           : undefined,
+      signal: controller.signal,
     });
   } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      return jsonError(
+        "API worker timeout",
+        `Upstream did not respond within ${UPSTREAM_TIMEOUT_MS / 1000}s`,
+        504
+      );
+    }
     return jsonError(
       "Unable to reach API worker",
       e instanceof Error ? e.message : "Network error"
     );
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 
   // If the Worker returned a server error, read the body and wrap it so
