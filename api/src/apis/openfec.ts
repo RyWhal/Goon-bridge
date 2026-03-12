@@ -108,8 +108,67 @@ async function readFecErrorDetails(resp: Response): Promise<string | null> {
 
 async function resolveCandidateCommitteeId(
   apiKey: string,
-  candidateId: string
+  candidateId: string,
+  twoYearPeriod?: string
 ): Promise<string | null> {
+  const targetCycle = Number(twoYearPeriod ?? defaultTwoYearPeriod());
+  const targetCycleValid = Number.isFinite(targetCycle);
+
+  const selectBestCommitteeId = (
+    committees: Array<{
+      committee_id?: string;
+      designation?: string;
+      cycles?: number[];
+      last_file_date?: string | null;
+    }>
+  ): string | null => {
+    const candidates = committees.filter(
+      (committee): committee is {
+        committee_id: string;
+        designation?: string;
+        cycles?: number[];
+        last_file_date?: string | null;
+      } => typeof committee.committee_id === "string" && committee.committee_id.length > 0
+    );
+    if (candidates.length === 0) return null;
+
+    const rankDesignation = (designation?: string): number => {
+      if (designation === "P") return 0;
+      if (designation === "A") return 1;
+      return 2;
+    };
+
+    const rankCycle = (cycles?: number[]): number => {
+      if (!Array.isArray(cycles) || cycles.length === 0) return -1;
+      return Math.max(...cycles);
+    };
+
+    const rankDate = (date?: string | null): number => {
+      if (!date) return 0;
+      const parsed = Date.parse(date);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    candidates.sort((a, b) => {
+      const aTarget = targetCycleValid && Array.isArray(a.cycles) && a.cycles.includes(targetCycle) ? 1 : 0;
+      const bTarget = targetCycleValid && Array.isArray(b.cycles) && b.cycles.includes(targetCycle) ? 1 : 0;
+      if (bTarget !== aTarget) return bTarget - aTarget;
+
+      const designationDelta = rankDesignation(a.designation) - rankDesignation(b.designation);
+      if (designationDelta !== 0) return designationDelta;
+
+      const cycleDelta = rankCycle(b.cycles) - rankCycle(a.cycles);
+      if (cycleDelta !== 0) return cycleDelta;
+
+      const dateDelta = rankDate(b.last_file_date) - rankDate(a.last_file_date);
+      if (dateDelta !== 0) return dateDelta;
+
+      return a.committee_id.localeCompare(b.committee_id);
+    });
+
+    return candidates[0]?.committee_id ?? null;
+  };
+
   try {
     const candidateResp = await fecFetch(
       `/candidate/${candidateId}/`,
@@ -122,49 +181,61 @@ async function resolveCandidateCommitteeId(
     const candidateData = (await candidateResp.json()) as {
       results?: Array<{
         principal_committees?: Array<{ committee_id?: string }>;
-        candidate_status?: string;
         [key: string]: unknown;
       }>;
     };
     const candidate = candidateData.results?.[0];
-    const firstAuthorized = candidate?.principal_committees?.find((committee) =>
-      typeof committee.committee_id === "string" && committee.committee_id.length > 0
-    );
-    if (firstAuthorized?.committee_id) return firstAuthorized.committee_id;
-
-    // Fallback for candidates missing principal committees in this endpoint.
-    const committeesResp = await fecFetch(
-      `/candidate/${candidateId}/committees/`,
-      apiKey,
-      {
-        per_page: "20",
-        sort: "-cycle",
-      },
-      FEC_BACKGROUND_FETCH_TIMEOUT_MS
-    );
-    if (!committeesResp.ok) return null;
-
-    const committeesData = (await committeesResp.json()) as {
-      results?: Array<{
-        committee_id?: string;
-        designation?: string;
-      }>;
-    };
-
-    const preferredCommittee = committeesData.results?.find(
+    const principalCommitteeId = candidate?.principal_committees?.find(
       (committee) =>
-        typeof committee.committee_id === "string" &&
-        committee.committee_id.length > 0 &&
-        (committee.designation === "P" || committee.designation === "A")
-    );
+        typeof committee.committee_id === "string" && committee.committee_id.length > 0
+    )?.committee_id;
+    if (principalCommitteeId) return principalCommitteeId;
 
-    if (preferredCommittee?.committee_id) return preferredCommittee.committee_id;
+    const fallbackQueries: Array<{
+      path: string;
+      params: Record<string, string>;
+    }> = [
+      {
+        path: `/candidate/${candidateId}/committees/`,
+        params: { per_page: "100", sort: "-last_file_date" },
+      },
+      {
+        path: `/candidate/${candidateId}/committees/`,
+        params: { per_page: "100" },
+      },
+      {
+        path: "/committees/",
+        params: { candidate_id: candidateId, per_page: "100", sort: "-last_file_date" },
+      },
+      {
+        path: "/committees/",
+        params: { candidate_id: candidateId, per_page: "100" },
+      },
+    ];
 
-    const firstCommittee = committeesData.results?.find(
-      (committee) => typeof committee.committee_id === "string" && committee.committee_id.length > 0
-    );
+    for (const query of fallbackQueries) {
+      const resp = await fecFetch(
+        query.path,
+        apiKey,
+        query.params,
+        FEC_FETCH_TIMEOUT_MS
+      );
+      if (!resp.ok) continue;
 
-    return firstCommittee?.committee_id ?? null;
+      const data = (await resp.json()) as {
+        results?: Array<{
+          committee_id?: string;
+          designation?: string;
+          cycles?: number[];
+          last_file_date?: string | null;
+        }>;
+      };
+
+      const committeeId = selectBestCommitteeId(data.results ?? []);
+      if (committeeId) return committeeId;
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -401,7 +472,7 @@ openfec.get("/contributions", async (c) => {
       }, 200, { "Cache-Control": "public, max-age=300" });
     }
 
-    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId, twoYearPeriod);
 
     try {
       const liveParams: Record<string, string> = {
@@ -482,7 +553,7 @@ openfec.get("/contributions", async (c) => {
 
   if (candidateId) {
     params["candidate_id"] = candidateId;
-    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId);
+    const committeeIdForCandidate = await resolveCandidateCommitteeId(apiKey, candidateId, twoYearPeriod);
     if (committeeIdForCandidate) {
       params["committee_id"] = committeeIdForCandidate;
     }
@@ -677,7 +748,7 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
   const topN = topNQuery === 5 || topNQuery === 10 || topNQuery === 20 ? topNQuery : 10;
 
   try {
-    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+    const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId, twoYearPeriod);
     if (!committeeId) {
       return c.json(
         {
@@ -1208,7 +1279,11 @@ openfec.get("/member/:bioguideId/contributions", async (c) => {
 
   for (const candidateId of candidateIds.slice(0, 3)) {
     try {
-      const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+      const committeeId = await resolveCandidateCommitteeId(
+        apiKey,
+        candidateId,
+        defaultTwoYearPeriod()
+      );
       if (!committeeId) continue;
 
       const resp = await fecFetch("/schedules/schedule_a/", apiKey, {
