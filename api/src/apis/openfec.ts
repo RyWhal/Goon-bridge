@@ -64,18 +64,50 @@ async function resolveCandidateCommitteeId(
         [key: string]: unknown;
       }>;
     };
-
     const candidate = candidateData.results?.[0];
-    if (!candidate?.principal_committees?.length) return null;
-
-    const firstAuthorized = candidate.principal_committees.find((committee) =>
+    const firstAuthorized = candidate?.principal_committees?.find((committee) =>
       typeof committee.committee_id === "string" && committee.committee_id.length > 0
     );
+    if (firstAuthorized?.committee_id) return firstAuthorized.committee_id;
 
-    return firstAuthorized?.committee_id ?? null;
+    // Fallback for candidates missing principal committees in this endpoint.
+    const committeesResp = await fecFetch(`/candidate/${candidateId}/committees/`, apiKey, {
+      per_page: "20",
+      sort: "-cycle",
+    });
+    if (!committeesResp.ok) return null;
+
+    const committeesData = (await committeesResp.json()) as {
+      results?: Array<{
+        committee_id?: string;
+        designation?: string;
+      }>;
+    };
+
+    const preferredCommittee = committeesData.results?.find(
+      (committee) =>
+        typeof committee.committee_id === "string" &&
+        committee.committee_id.length > 0 &&
+        (committee.designation === "P" || committee.designation === "A")
+    );
+
+    if (preferredCommittee?.committee_id) return preferredCommittee.committee_id;
+
+    const firstCommittee = committeesData.results?.find(
+      (committee) => typeof committee.committee_id === "string" && committee.committee_id.length > 0
+    );
+
+    return firstCommittee?.committee_id ?? null;
   } catch {
     return null;
   }
+}
+
+function defaultTwoYearPeriod(): string {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const evenYear = year % 2 === 0 ? year : year + 1;
+  return String(evenYear);
 }
 
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
@@ -206,7 +238,7 @@ openfec.get("/contributions", async (c) => {
   if (maxDate) params["max_date"] = maxDate;
 
   const twoYearPeriod = c.req.query("two_year_period");
-  if (twoYearPeriod) params["two_year_transaction_period"] = twoYearPeriod;
+  params["two_year_transaction_period"] = twoYearPeriod ?? defaultTwoYearPeriod();
 
   const state = c.req.query("state");
   if (state) params["contributor_state"] = state;
@@ -496,11 +528,15 @@ openfec.get("/member/:bioguideId/contributions", async (c) => {
 
   for (const candidateId of candidateIds.slice(0, 3)) {
     try {
+      const committeeId = await resolveCandidateCommitteeId(apiKey, candidateId);
+      if (!committeeId) continue;
+
       const resp = await fecFetch("/schedules/schedule_a/", apiKey, {
-        candidate_id: candidateId,
+        committee_id: committeeId,
         per_page: "50",
         sort: "-contribution_receipt_amount",
         is_individual: "true",
+        two_year_transaction_period: defaultTwoYearPeriod(),
       });
       if (resp.ok) {
         const data = (await resp.json()) as {
