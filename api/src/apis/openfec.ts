@@ -225,6 +225,9 @@ openfec.get("/contributions", async (c) => {
   const employer = c.req.query("employer");
   if (employer) params["contributor_employer"] = employer;
 
+  const contributorName = c.req.query("contributor_name");
+  if (contributorName) params["contributor_name"] = contributorName;
+
   const minAmount = c.req.query("min_amount");
   if (minAmount) params["min_amount"] = minAmount;
 
