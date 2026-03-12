@@ -6,6 +6,7 @@ const openfec = new Hono<Env>();
 
 const BASE = "https://api.open.fec.gov/v1";
 const FEC_FETCH_TIMEOUT_MS = 12_000;
+const FEC_BACKGROUND_FETCH_TIMEOUT_MS = 30_000;
 const CONTRIBUTIONS_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 const CANDIDATE_REFRESH_PER_PAGE = 25;
 const CANDIDATE_REFRESH_MAX_PAGES = 100;
@@ -67,7 +68,8 @@ function hasSupabase(env: Env["Bindings"]): boolean {
 async function fecFetch(
   path: string,
   apiKey: string,
-  params?: Record<string, string>
+  params?: Record<string, string>,
+  timeoutMs = FEC_FETCH_TIMEOUT_MS
 ): Promise<Response> {
   const url = new URL(`${BASE}${path}`);
   url.searchParams.set("api_key", apiKey);
@@ -78,13 +80,13 @@ async function fecFetch(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FEC_FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     return await fetch(url.toString(), { signal: controller.signal });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new FecTimeoutError(`OpenFEC request timed out after ${FEC_FETCH_TIMEOUT_MS}ms`);
+      throw new FecTimeoutError(`OpenFEC request timed out after ${timeoutMs}ms`);
     }
     throw error;
   } finally {
@@ -121,7 +123,12 @@ async function resolveCandidateCommitteeId(
   candidateId: string
 ): Promise<string | null> {
   try {
-    const candidateResp = await fecFetch(`/candidate/${candidateId}/`, apiKey);
+    const candidateResp = await fecFetch(
+      `/candidate/${candidateId}/`,
+      apiKey,
+      undefined,
+      FEC_BACKGROUND_FETCH_TIMEOUT_MS
+    );
     if (!candidateResp.ok) return null;
 
     const candidateData = (await candidateResp.json()) as {
@@ -138,10 +145,15 @@ async function resolveCandidateCommitteeId(
     if (firstAuthorized?.committee_id) return firstAuthorized.committee_id;
 
     // Fallback for candidates missing principal committees in this endpoint.
-    const committeesResp = await fecFetch(`/candidate/${candidateId}/committees/`, apiKey, {
-      per_page: "20",
-      sort: "-cycle",
-    });
+    const committeesResp = await fecFetch(
+      `/candidate/${candidateId}/committees/`,
+      apiKey,
+      {
+        per_page: "20",
+        sort: "-cycle",
+      },
+      FEC_BACKGROUND_FETCH_TIMEOUT_MS
+    );
     if (!committeesResp.ok) return null;
 
     const committeesData = (await committeesResp.json()) as {
@@ -275,7 +287,6 @@ async function refreshCandidateContributionsCache(
   ) {
     const refreshParams: Record<string, string> = {
       per_page: String(CANDIDATE_REFRESH_PER_PAGE),
-      sort: "-contribution_receipt_date",
       is_individual: "true",
       two_year_transaction_period: twoYearPeriod,
     };
@@ -294,7 +305,12 @@ async function refreshCandidateContributionsCache(
 
     let refreshResp: Response;
     try {
-      refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, refreshParams);
+      refreshResp = await fecFetch(
+        "/schedules/schedule_a/",
+        apiKey,
+        refreshParams,
+        FEC_BACKGROUND_FETCH_TIMEOUT_MS
+      );
     } catch (error) {
       if (!(error instanceof FecTimeoutError)) {
         throw error;
@@ -304,7 +320,12 @@ async function refreshCandidateContributionsCache(
         ...refreshParams,
         per_page: "10",
       };
-      refreshResp = await fecFetch("/schedules/schedule_a/", apiKey, smallerPageParams);
+      refreshResp = await fecFetch(
+        "/schedules/schedule_a/",
+        apiKey,
+        smallerPageParams,
+        FEC_BACKGROUND_FETCH_TIMEOUT_MS
+      );
     }
 
     if (!refreshResp.ok) {
