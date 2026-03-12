@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 
@@ -115,6 +115,7 @@ const OFFICE_OPTIONS = [
 const PAGE_SIZE = 20;
 const SUMMARY_POLL_INTERVAL_MS = 3000;
 const SUMMARY_MAX_POLL_ATTEMPTS = 40;
+const SUMMARY_MIN_REQUEST_GAP_MS = 2500;
 
 function cursorFromLastIndexes(
   lastIndexes?: Record<string, string | number>
@@ -152,16 +153,33 @@ export function FecSearch() {
     1: null,
   });
   const [summaryPollAttempts, setSummaryPollAttempts] = useState(0);
+  const summaryRequestInFlightRef = useRef(false);
+  const summaryLastRequestAtRef = useRef(0);
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
   const candidateSummary = useApi<CandidateContributionSummaryResponse>();
 
   const fetchCandidateSummary = useCallback(
-    (candidateId: string, topN: 5 | 10 | 20) => {
+    async (
+      candidateId: string,
+      topN: 5 | 10 | 20,
+      options?: { force?: boolean }
+    ) => {
+      const force = options?.force ?? false;
+      const now = Date.now();
+      if (!force && summaryRequestInFlightRef.current) return;
+      if (!force && now - summaryLastRequestAtRef.current < SUMMARY_MIN_REQUEST_GAP_MS) return;
+
+      summaryRequestInFlightRef.current = true;
+      summaryLastRequestAtRef.current = now;
       const params = new URLSearchParams({ top_n: String(topN) });
-      candidateSummary.fetchData(
-        `/api/fec/candidates/${candidateId}/summary?${params.toString()}`
-      );
+      try {
+        await candidateSummary.fetchData(
+          `/api/fec/candidates/${candidateId}/summary?${params.toString()}`
+        );
+      } finally {
+        summaryRequestInFlightRef.current = false;
+      }
     },
     [candidateSummary.fetchData]
   );
@@ -227,7 +245,7 @@ export function FecSearch() {
   useEffect(() => {
     if (!selectedCandidate?.candidate_id) return;
     setSummaryPollAttempts(0);
-    fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN);
+    void fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN, { force: true });
   }, [candidateTopN, selectedCandidate?.candidate_id, fetchCandidateSummary]);
 
   useEffect(() => {
@@ -238,7 +256,7 @@ export function FecSearch() {
     if (summaryPollAttempts >= SUMMARY_MAX_POLL_ATTEMPTS) return;
 
     const timer = setTimeout(() => {
-      fetchCandidateSummary(selectedCandidate.candidate_id!, candidateTopN);
+      void fetchCandidateSummary(selectedCandidate.candidate_id!, candidateTopN);
       setSummaryPollAttempts((n) => n + 1);
     }, SUMMARY_POLL_INTERVAL_MS);
 
@@ -517,9 +535,22 @@ export function FecSearch() {
 
             {candidateSummary.data?.summary_pending && (
               <div className="px-3 py-2 bg-vibe-border/40 rounded">
-                <p className="text-xs text-vibe-dim">
-                  {candidateSummary.data.message ?? "Summary is being prepared. Try again shortly."}
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-vibe-dim">
+                    {candidateSummary.data.message ?? "Summary is being prepared. Try again shortly."}
+                  </p>
+                  <button
+                    className="btn btn-ghost text-xs py-1"
+                    onClick={() => {
+                      if (!selectedCandidate?.candidate_id) return;
+                      void fetchCandidateSummary(selectedCandidate.candidate_id, candidateTopN, {
+                        force: true,
+                      });
+                    }}
+                  >
+                    Retry now
+                  </button>
+                </div>
               </div>
             )}
 
