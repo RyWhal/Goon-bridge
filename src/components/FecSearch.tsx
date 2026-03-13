@@ -101,42 +101,7 @@ interface CandidateContributionSummaryResponse {
   };
 }
 
-interface LobbyingResult {
-  symbol: string;
-  name: string | null;
-  description: string | null;
-  country: string | null;
-  uuid: string | null;
-  year: number | null;
-  period: string | null;
-  type: string | null;
-  documentUrl: string | null;
-  income: number | null;
-  expenses: number | null;
-  postedName: string | null;
-  dtPosted: string | null;
-  clientId: string | null;
-  registrantId: string | null;
-  senateId: string | null;
-  houseRegistrantId: string | null;
-  chambers: string[];
-  chamberLabel: string;
-}
-
-interface LobbyingSearchResponse {
-  symbol: string;
-  from: string;
-  to: string;
-  count: number;
-  summary: {
-    senateCount: number;
-    houseCount: number;
-    dualFiledCount: number;
-  };
-  data: LobbyingResult[];
-}
-
-type SearchMode = "candidates" | "contributions" | "lobbying";
+type SearchMode = "candidates" | "contributions";
 type DonationSort = "high_to_low" | "low_to_high";
 type ContributionCursor = Partial<
   Pick<
@@ -164,20 +129,6 @@ const PAGE_SIZE = 20;
 const SUMMARY_MIN_REQUEST_GAP_MS = 2500;
 const SUMMARY_PENDING_RETRY_DELAY_MS = 3000;
 const SUMMARY_PENDING_MAX_RETRIES = 6;
-
-function formatDateInput(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-function defaultLobbyingStartDate(): string {
-  const date = new Date();
-  date.setUTCFullYear(date.getUTCFullYear() - 2);
-  return formatDateInput(date);
-}
-
-function defaultLobbyingEndDate(): string {
-  return formatDateInput(new Date());
-}
 
 function cursorFromLastIndexes(
   lastIndexes?: Record<string, string | number>
@@ -209,9 +160,6 @@ export function FecSearch() {
   const [officeFilter, setOfficeFilter] = useState("");
   const [includeRefunds, setIncludeRefunds] = useState(false);
   const [contributionsSort, setContributionsSort] = useState<DonationSort>("high_to_low");
-  const [lobbyingSymbol, setLobbyingSymbol] = useState("");
-  const [lobbyingFrom, setLobbyingFrom] = useState(defaultLobbyingStartDate);
-  const [lobbyingTo, setLobbyingTo] = useState(defaultLobbyingEndDate);
   const [candidateTopN, setCandidateTopN] = useState<5 | 10 | 20>(10);
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
   const [contributionsPage, setContributionsPage] = useState(1);
@@ -226,7 +174,6 @@ export function FecSearch() {
   const candidates = useApi<CandidateSearchResponse>();
   const contributions = useApi<ContributionSearchResponse>();
   const candidateSummary = useApi<CandidateContributionSummaryResponse>();
-  const lobbying = useApi<LobbyingSearchResponse>();
 
   const fetchCandidateSummary = useCallback(
     async (
@@ -304,18 +251,6 @@ export function FecSearch() {
   const searchContributions = () => {
     setContributionsCursors({ 1: null });
     fetchContributionsPage(1);
-  };
-
-  const searchLobbying = () => {
-    const symbol = lobbyingSymbol.trim().toUpperCase();
-    if (!symbol || !lobbyingFrom || !lobbyingTo) return;
-
-    const params = new URLSearchParams({
-      symbol,
-      from: lobbyingFrom,
-      to: lobbyingTo,
-    });
-    lobbying.fetchData(`/api/finnhub/lobbying?${params.toString()}`);
   };
 
   const handleCandidateClick = (c: CandidateResult) => {
@@ -439,7 +374,7 @@ export function FecSearch() {
     <div className="space-y-4">
       <div className="card">
         <h2 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider mb-3">
-          Federal Election Commission Data
+          Campaign Finance
         </h2>
 
         {/* Mode toggle */}
@@ -459,15 +394,6 @@ export function FecSearch() {
             className={`btn ${mode === "contributions" ? "btn-primary" : "btn-ghost"}`}
           >
             Contributions
-          </button>
-          <button
-            onClick={() => {
-              setMode("lobbying");
-              setSelectedCandidate(null);
-            }}
-            className={`btn ${mode === "lobbying" ? "btn-primary" : "btn-ghost"}`}
-          >
-            Lobbying
           </button>
         </div>
 
@@ -576,43 +502,8 @@ export function FecSearch() {
           </div>
         )}
 
-        {mode === "lobbying" && (
-          <div className="space-y-2">
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="text"
-                className="input sm:max-w-[180px]"
-                placeholder="Ticker (AAPL)"
-                value={lobbyingSymbol}
-                onChange={(e) => setLobbyingSymbol(e.target.value.toUpperCase())}
-                onKeyDown={(e) => e.key === "Enter" && searchLobbying()}
-              />
-              <input
-                type="date"
-                className="input flex-1"
-                value={lobbyingFrom}
-                onChange={(e) => setLobbyingFrom(e.target.value)}
-              />
-              <input
-                type="date"
-                className="input flex-1"
-                value={lobbyingTo}
-                onChange={(e) => setLobbyingTo(e.target.value)}
-              />
-              <button onClick={searchLobbying} className="btn btn-primary">
-                Search
-              </button>
-            </div>
-            <p className="text-xs text-vibe-dim">
-              Finnhub aggregates Lobbying Disclosure Act filings keyed by company ticker.
-            </p>
-          </div>
-        )}
-
         <p className="text-xs text-vibe-dim mt-2">
-          Source: {mode === "lobbying"
-            ? "Finnhub lobbying data, sourced from public House and Senate disclosure records."
-            : "OpenFEC (Federal Election Commission). All data is public record."}
+          Source: OpenFEC (Federal Election Commission). All data is public record.
         </p>
       </div>
 
@@ -941,93 +832,6 @@ export function FecSearch() {
           <JsonViewer data={contributions.data} label="Full API Response" />
         </div>
       )}
-
-      {mode === "lobbying" && lobbying.loading && <LoadingRows />}
-      {mode === "lobbying" && lobbying.error && (
-        <div className="card border-vibe-nay/30">
-          <p className="text-sm text-vibe-nay">{lobbying.error}</p>
-        </div>
-      )}
-      {mode === "lobbying" && lobbying.data && (
-        <div className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            <SummaryStat label="Ticker" value={lobbying.data.symbol} />
-            <SummaryStat label="Filings" value={lobbying.data.count.toLocaleString()} />
-            <SummaryStat
-              label="Senate-linked"
-              value={lobbying.data.summary.senateCount.toLocaleString()}
-            />
-            <SummaryStat
-              label="House-linked"
-              value={lobbying.data.summary.houseCount.toLocaleString()}
-            />
-          </div>
-
-          <p className="text-xs text-vibe-dim">
-            Window: {lobbying.data.from} to {lobbying.data.to} · Dual-filed records:{" "}
-            {lobbying.data.summary.dualFiledCount.toLocaleString()}
-          </p>
-
-          {lobbying.data.data.length === 0 ? (
-            <div className="card">
-              <p className="text-sm text-vibe-dim">
-                No lobbying filings matched this ticker and date range.
-              </p>
-            </div>
-          ) : (
-            lobbying.data.data.map((record) => (
-              <div key={record.uuid ?? `${record.symbol}-${record.year}-${record.type}-${record.clientId}`} className="card">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-medium">{record.name ?? record.symbol}</p>
-                      <span className="badge bg-vibe-border text-vibe-text">
-                        {record.chamberLabel}
-                      </span>
-                      {record.type && (
-                        <span className="badge bg-vibe-money/20 text-vibe-money">
-                          {record.type}
-                        </span>
-                      )}
-                    </div>
-                    {record.description && (
-                      <p className="text-xs text-vibe-dim mt-1">{record.description}</p>
-                    )}
-                    <p className="text-xs text-vibe-dim mt-1">
-                      {record.year ?? "Unknown year"}
-                      {record.period ? ` · ${record.period.replace(/_/g, " ")}` : ""}
-                      {record.country ? ` · ${record.country}` : ""}
-                    </p>
-                    <p className="text-xs text-vibe-dim mt-1">
-                      Senate ID: {record.senateId ?? "N/A"} | House ID: {record.houseRegistrantId ?? "N/A"}
-                    </p>
-                    {record.documentUrl && (
-                      <a
-                        href={record.documentUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-vibe-accent hover:underline inline-block mt-2"
-                      >
-                        View filing →
-                      </a>
-                    )}
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-bold text-vibe-money">
-                      {formatLobbyingAmount(record.income, record.expenses)}
-                    </p>
-                    <p className="text-xs text-vibe-dim">
-                      income / expenses
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-
-          <JsonViewer data={lobbying.data} label="Full API Response" />
-        </div>
-      )}
     </div>
   );
 }
@@ -1088,10 +892,4 @@ function LoadingRows() {
       ))}
     </div>
   );
-}
-
-function formatLobbyingAmount(income: number | null, expenses: number | null): string {
-  const incomeText = income == null ? "-" : `$${income.toLocaleString()}`;
-  const expensesText = expenses == null ? "-" : `$${expenses.toLocaleString()}`;
-  return `${incomeText} / ${expensesText}`;
 }

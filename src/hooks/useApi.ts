@@ -38,7 +38,7 @@ export function useApi<T>() {
           }
         }
         setState({ data: null, loading: false, error: errorMsg });
-        return;
+        return null;
       }
       const data = (await resp.json()) as T & { error?: string; detail?: string };
 
@@ -51,16 +51,18 @@ export function useApi<T>() {
           loading: false,
           error: data.detail ? `${data.error}: ${data.detail}` : data.error,
         });
-        return;
+        return null;
       }
 
       setState({ data, loading: false, error: null });
+      return data;
     } catch (e) {
       setState({
         data: null,
         loading: false,
         error: e instanceof Error ? e.message : "Network error",
       });
+      return null;
     }
   }, []);
 
