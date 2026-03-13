@@ -239,15 +239,25 @@ type CongressPartyHistoryItem = {
 };
 
 type CongressMemberLike = {
-  party?: string;
+  party?: string | null;
   partyName?: string;
   partyHistory?: CongressPartyHistoryItem[];
-  terms?: { item?: Array<{ party?: string; partyName?: string; partyAbbreviation?: string }> };
+  terms?: {
+    item?: Array<{
+      party?: string;
+      partyName?: string;
+      partyAbbreviation?: string;
+      chamber?: string;
+      startYear?: number;
+      endYear?: number;
+    }>;
+  };
 };
 
 type CongressMemberApiMember = {
   bioguideId?: string;
   name?: string;
+  directOrderName?: string;
   party?: string;
   partyName?: string;
   partyHistory?: CongressPartyHistoryItem[];
@@ -261,6 +271,21 @@ type CongressMembersResponse = {
   members?: CongressMemberApiMember[];
   pagination?: { count?: number; next?: string };
   [key: string]: unknown;
+};
+
+type CongressMemberDetailTerm = {
+  chamber?: string;
+  congress?: number;
+  startYear?: number;
+  endYear?: number;
+};
+
+type CongressMemberDetailResponse = {
+  member?: {
+    bioguideId?: string;
+    directOrderName?: string;
+    terms?: CongressMemberDetailTerm[] | { item?: CongressMemberDetailTerm[] };
+  };
 };
 
 function normalizePartyValue(raw?: string | null): string | null {
@@ -305,6 +330,131 @@ function normalizeCongressMembers(members: CongressMemberApiMember[]) {
     ...member,
     party: extractMemberParty(member),
   }));
+}
+
+function extractMemberChamber(member: CongressMemberLike & Record<string, unknown>): string | null {
+  const currentTerm = member.terms?.item?.[0];
+  const chamber =
+    typeof currentTerm?.chamber === "string"
+      ? currentTerm.chamber
+      : typeof member.chamber === "string"
+        ? member.chamber
+        : null;
+
+  if (!chamber) return null;
+
+  const normalized = chamber.trim().toLowerCase();
+  if (normalized.includes("senate")) return "Senate";
+  if (normalized.includes("house")) return "House";
+  return chamber;
+}
+
+function inferMemberChamber(member: {
+  chamber?: string | null;
+  district?: number | null;
+  senateVotes?: number | null;
+  houseVotes?: number | null;
+}): string | null {
+  if (member.chamber) return member.chamber;
+  if ((member.senateVotes ?? 0) > 0 && (member.houseVotes ?? 0) === 0) return "Senate";
+  if ((member.houseVotes ?? 0) > 0 && (member.senateVotes ?? 0) === 0) return "House";
+  if (member.district == null) return "Senate";
+  return "House";
+}
+
+function summarizeMemberTerms(
+  terms: CongressMemberDetailTerm[] | { item?: CongressMemberDetailTerm[] } | undefined
+) {
+  const allTerms = Array.isArray(terms)
+    ? terms
+    : Array.isArray(terms?.item)
+      ? terms.item
+      : [];
+  if (!allTerms.length) {
+    return {
+      chamber: null as string | null,
+      firstCongress: null as number | null,
+      lastCongress: null as number | null,
+      totalTerms: 0,
+      congressesServed: null as number | null,
+      yearsServed: null as number | null,
+    };
+  }
+
+  const chambers = allTerms.map((term) => normalizeChamberLabel(term.chamber)).filter(Boolean);
+  const senateCount = chambers.filter((value) => value === "Senate").length;
+  const houseCount = chambers.filter((value) => value === "House").length;
+  const chamber =
+    senateCount === houseCount
+      ? chambers[0] ?? null
+      : senateCount > houseCount
+        ? "Senate"
+        : "House";
+
+  const congresses = allTerms
+    .map((term) => term.congress)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const totalTerms = allTerms.length;
+  const congressesServed = congresses.length
+    ? new Set(congresses).size
+    : totalTerms;
+  const firstCongress = congresses.length ? Math.min(...congresses) : null;
+  const lastCongress = congresses.length ? Math.max(...congresses) : null;
+
+  const startYears = allTerms
+    .map((term) => term.startYear)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const endYears = allTerms
+    .map((term) => term.endYear ?? new Date().getFullYear())
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const yearsServed =
+    startYears.length && endYears.length
+      ? Math.max(0, Math.max(...endYears) - Math.min(...startYears))
+      : null;
+
+  return { chamber, firstCongress, lastCongress, totalTerms, congressesServed, yearsServed };
+}
+
+function normalizeChamberLabel(chamber?: string | null): string | null {
+  const value = (chamber ?? "").trim().toLowerCase();
+  if (!value) return null;
+  if (value.includes("senate")) return "Senate";
+  if (value.includes("house")) return "House";
+  return chamber ?? null;
+}
+
+async function fetchMemberDetailSummary(
+  apiKey: string,
+  bioguideId: string
+): Promise<{
+  directOrderName?: string;
+  chamber?: string | null;
+  firstCongress?: number | null;
+  lastCongress?: number | null;
+  totalTerms?: number;
+  congressesServed?: number | null;
+  yearsServed?: number | null;
+} | null> {
+  try {
+    const resp = await congressFetch(`/member/${bioguideId}`, apiKey);
+    if (!resp.ok) return null;
+
+    const data = (await resp.json()) as CongressMemberDetailResponse;
+    if (!data.member) return null;
+
+    const summary = summarizeMemberTerms(data.member.terms);
+    return {
+      directOrderName: data.member.directOrderName,
+      chamber: summary.chamber,
+      firstCongress: summary.firstCongress,
+      lastCongress: summary.lastCongress,
+      totalTerms: summary.totalTerms,
+      congressesServed: summary.congressesServed ?? summary.totalTerms,
+      yearsServed: summary.yearsServed,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchCongressMembersPage(
@@ -820,9 +970,12 @@ congress.get("/members", async (c) => {
         .map((m) => ({
           bioguide_id: m.bioguideId!,
           name: m.name ?? "",
+          direct_order_name:
+            typeof m.directOrderName === "string" ? m.directOrderName : null,
           party: m.party ?? null,
           state: m.state ?? null,
           district: m.district ?? null,
+          chamber: extractMemberChamber(m) ?? null,
           image_url: m.depiction?.imageUrl ?? null,
           congress: parseInt(currentCongress, 10),
         }));
@@ -872,9 +1025,12 @@ congress.get("/members/search", async (c) => {
         .map((m) => ({
           bioguide_id: m.bioguideId!,
           name: m.name ?? "",
+          direct_order_name:
+            typeof m.directOrderName === "string" ? m.directOrderName : null,
           party: m.party ?? null,
           state: m.state ?? null,
           district: m.district ?? null,
+          chamber: extractMemberChamber(m) ?? null,
           image_url: m.depiction?.imageUrl ?? null,
           congress: parseInt(currentCongress, 10),
         }));
@@ -887,6 +1043,148 @@ congress.get("/members/search", async (c) => {
       { members: filtered, count: filtered.length },
       200,
       { "Cache-Control": "public, max-age=3600" }
+    );
+  } catch {
+    return c.json({ error: "Failed to fetch from Congress API" }, 502);
+  }
+});
+
+// ── GET /api/congress/members/browse ─────────────────────────────────────────
+// Browse members from Supabase cache first so the UI can filter/sort locally.
+congress.get("/members/browse", async (c) => {
+  const currentCongress = parseBoundedInt(c.req.query("congress"), 119, 1, 999);
+  const apiKey = c.env.CONGRESS_API_KEY;
+
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const [membersRes, statsRes] = await Promise.all([
+        sb
+          .from("members")
+          .select(
+            "bioguide_id,name,direct_order_name,party,state,district,chamber,image_url,congress"
+          )
+          .eq("congress", currentCongress)
+          .order("name", { ascending: true }),
+        sb
+          .from("member_vote_stats")
+          .select("bioguide_id,first_congress,last_congress,house_votes,senate_votes"),
+      ]);
+
+      if (membersRes.error) throw membersRes.error;
+      if (statsRes.error) throw statsRes.error;
+
+      const statsById = new Map(
+        (statsRes.data ?? []).map((row) => [row.bioguide_id, row])
+      );
+      const rows = membersRes.data ?? [];
+      const detailSummaries = new Map<string, Awaited<ReturnType<typeof fetchMemberDetailSummary>>>();
+      if (apiKey && rows.length > 0) {
+        const detailResults = await mapInBatches(rows.map((row) => row.bioguide_id), 10, async (bioguideId) => ({
+          bioguideId,
+          detail: await fetchMemberDetailSummary(apiKey, bioguideId),
+        }));
+
+        for (const result of detailResults) {
+          detailSummaries.set(result.bioguideId, result.detail);
+        }
+      }
+
+      const members = rows.map((row) => {
+        const stats = statsById.get(row.bioguide_id);
+        const detail = detailSummaries.get(row.bioguide_id);
+        const chamber = inferMemberChamber({
+          chamber: normalizeChamberLabel(row.chamber) ?? detail?.chamber ?? row.chamber,
+          district: row.district,
+          houseVotes: stats?.house_votes ?? null,
+          senateVotes: stats?.senate_votes ?? null,
+        });
+        const firstCongress = stats?.first_congress ?? detail?.firstCongress ?? row.congress ?? null;
+        const lastCongress = stats?.last_congress ?? detail?.lastCongress ?? row.congress ?? null;
+        const congressesServed =
+          detail?.congressesServed ??
+          detail?.totalTerms ??
+          (firstCongress != null && lastCongress != null
+            ? Math.max(1, lastCongress - firstCongress + 1)
+            : null);
+
+        return {
+          bioguideId: row.bioguide_id,
+          name: row.name,
+          directOrderName: detail?.directOrderName ?? row.direct_order_name,
+          party: row.party,
+          state: row.state,
+          district: row.district,
+          chamber,
+          depiction: row.image_url ? { imageUrl: row.image_url } : undefined,
+          firstCongress,
+          lastCongress,
+          congressesServed,
+        };
+      });
+
+      if (members.length > 0) {
+        return c.json(
+          { members, count: members.length, source: "supabase_cache" },
+          200,
+          { "Cache-Control": "public, max-age=300" }
+        );
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
+
+  if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
+
+  try {
+    const normalizedMembers = normalizeCongressMembers(
+      await fetchAllCongressMembers(apiKey, String(currentCongress))
+    );
+    const detailResults = await mapInBatches(
+      normalizedMembers.filter((member) => !!member.bioguideId),
+      10,
+      async (member) => ({
+        bioguideId: member.bioguideId!,
+        detail: await fetchMemberDetailSummary(apiKey, member.bioguideId!),
+      })
+    );
+    const detailSummaries = new Map(
+      detailResults.map((result) => [result.bioguideId, result.detail])
+    );
+
+    const members = normalizedMembers.map((member) => {
+      const detail = member.bioguideId ? detailSummaries.get(member.bioguideId) : null;
+      const firstCongress = detail?.firstCongress ?? currentCongress;
+      const lastCongress = detail?.lastCongress ?? currentCongress;
+
+        return {
+          bioguideId: member.bioguideId,
+          name: member.name,
+        directOrderName:
+          detail?.directOrderName ??
+          (typeof member.directOrderName === "string" ? member.directOrderName : undefined),
+        party: member.party,
+        state: member.state,
+        district: member.district,
+        chamber:
+          detail?.chamber ??
+          extractMemberChamber(member) ??
+          inferMemberChamber(member),
+          depiction: member.depiction,
+          firstCongress,
+          lastCongress,
+          congressesServed:
+            detail?.congressesServed ??
+            detail?.totalTerms ??
+            Math.max(1, lastCongress - firstCongress + 1),
+        };
+      });
+
+    return c.json(
+      { members, count: members.length, source: "congress_live" },
+      200,
+      { "Cache-Control": "public, max-age=300" }
     );
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);

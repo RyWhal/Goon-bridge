@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 import { buildBillLinks, formatBillLabel, formatVotePositionLabel, normalizeVotePosition } from "../lib/congress";
@@ -6,9 +6,14 @@ import { buildBillLinks, formatBillLabel, formatVotePositionLabel, normalizeVote
 interface MemberResult {
   name?: string;
   bioguideId?: string;
+  directOrderName?: string;
   state?: string;
   party?: string;
   district?: number;
+  chamber?: string;
+  firstCongress?: number | null;
+  lastCongress?: number | null;
+  congressesServed?: number | null;
   terms?: { item?: Array<{ chamber?: string }> };
   depiction?: { imageUrl?: string };
 }
@@ -16,7 +21,7 @@ interface MemberResult {
 interface MemberSearchResponse {
   members?: MemberResult[];
   count?: number;
-  pagination?: { count?: number; next?: string };
+  source?: string;
 }
 
 interface MemberTerm {
@@ -69,59 +74,45 @@ interface MemberVotesResponse {
   count?: number;
 }
 
-const LIMIT = 50;
+type PartyFilter = "all" | "D" | "R" | "I";
+type ChamberFilter = "all" | "House" | "Senate";
+type SortOption =
+  | "name-asc"
+  | "state-asc"
+  | "congresses-desc"
+  | "congresses-asc";
+
+function normalizeParty(party?: string | null): PartyFilter | null {
+  const value = (party ?? "").trim().toUpperCase();
+  if (value === "D" || value === "DEMOCRAT" || value === "DEMOCRATIC") return "D";
+  if (value === "R" || value === "REPUBLICAN") return "R";
+  if (value === "I" || value === "INDEPENDENT") return "I";
+  return null;
+}
+
+function normalizeChamber(chamber?: string | null): ChamberFilter | null {
+  const value = (chamber ?? "").trim().toLowerCase();
+  if (value.includes("house")) return "House";
+  if (value.includes("senate")) return "Senate";
+  return null;
+}
 
 export function MemberSearch() {
   const [query, setQuery] = useState("");
   const [congress, setCongress] = useState("119");
-  const [offset, setOffset] = useState(0);
-  const [allMembers, setAllMembers] = useState<MemberResult[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
+  const [partyFilter, setPartyFilter] = useState<PartyFilter>("all");
+  const [chamberFilter, setChamberFilter] = useState<ChamberFilter>("all");
+  const [sortBy, setSortBy] = useState<SortOption>("name-asc");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const isLoadMore = useRef(false);
 
-  const search = useApi<MemberSearchResponse>();
+  const browse = useApi<MemberSearchResponse>();
   const detail = useApi<MemberDetailResponse>();
   const memberVotes = useApi<MemberVotesResponse>();
 
-  // Accumulate members across pages
   useEffect(() => {
-    if (!search.data?.members) return;
-    const incoming = search.data.members;
-    if (isLoadMore.current) {
-      setAllMembers((prev) => [...prev, ...incoming]);
-    } else {
-      setAllMembers(incoming);
-    }
-    setTotalCount(
-      search.data.count ??
-        search.data.pagination?.count ??
-        incoming.length
-    );
-    isLoadMore.current = false;
-  }, [search.data]);
-
-  const doFetch = (newOffset: number) => {
-    const base = query.trim()
-      ? `/api/congress/members/search?q=${encodeURIComponent(query)}&congress=${congress}`
-      : `/api/congress/members?congress=${congress}`;
-    search.fetchData(`${base}&limit=${LIMIT}&offset=${newOffset}`);
-  };
-
-  const handleSearch = () => {
-    isLoadMore.current = false;
-    setOffset(0);
-    setAllMembers([]);
+    browse.fetchData(`/api/congress/members/browse?congress=${congress}`);
     setExpandedId(null);
-    doFetch(0);
-  };
-
-  const handleLoadMore = () => {
-    const next = offset + LIMIT;
-    isLoadMore.current = true;
-    setOffset(next);
-    doFetch(next);
-  };
+  }, [browse.fetchData, congress]);
 
   const handleMemberClick = (bioguideId: string) => {
     if (expandedId === bioguideId) {
@@ -133,22 +124,58 @@ export function MemberSearch() {
     memberVotes.fetchData(`/api/congress/member-votes/${bioguideId}?congress=${congress}&limit=30`);
   };
 
-  const hasMore = allMembers.length < totalCount && totalCount > 0;
+  const allMembers = browse.data?.members ?? [];
+  const normalizedQuery = query.trim().toLowerCase();
+
+  const filteredMembers = [...allMembers]
+    .filter((member) => {
+      const memberParty = normalizeParty(member.party);
+      const memberChamber =
+        normalizeChamber(member.chamber) ??
+        (member.district == null ? "Senate" : "House");
+
+      if (partyFilter !== "all" && memberParty !== partyFilter) return false;
+      if (chamberFilter !== "all" && memberChamber !== chamberFilter) return false;
+      if (!normalizedQuery) return true;
+
+      const name = (member.name ?? member.directOrderName ?? "").toLowerCase();
+      const state = (member.state ?? "").toLowerCase();
+      return name.includes(normalizedQuery) || state.includes(normalizedQuery);
+    })
+    .sort((left, right) => {
+      const leftName = (left.name ?? left.directOrderName ?? "").toLowerCase();
+      const rightName = (right.name ?? right.directOrderName ?? "").toLowerCase();
+      const leftState = (left.state ?? "").toLowerCase();
+      const rightState = (right.state ?? "").toLowerCase();
+      const leftCongresses = left.congressesServed ?? 0;
+      const rightCongresses = right.congressesServed ?? 0;
+
+      switch (sortBy) {
+        case "state-asc":
+          return leftState.localeCompare(rightState) || leftName.localeCompare(rightName);
+        case "congresses-desc":
+          return rightCongresses - leftCongresses || leftName.localeCompare(rightName);
+        case "congresses-asc":
+          return leftCongresses - rightCongresses || leftName.localeCompare(rightName);
+        case "name-asc":
+        default:
+          return leftName.localeCompare(rightName);
+      }
+    });
 
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider mb-3">
-          Search Members of Congress
+        <h2 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider mb-4">
+          Browse Members of Congress
         </h2>
-        <div className="flex flex-col sm:flex-row gap-2">
+        <div className="flex flex-col lg:flex-row gap-3">
           <input
             type="text"
             className="input flex-1"
-            placeholder="Search by name, state, or party..."
+            placeholder="Search by name or state..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSearch()}
           />
           <select
             className="select"
@@ -160,30 +187,87 @@ export function MemberSearch() {
             <option value="117">117th Congress (2021–2023)</option>
             <option value="116">116th Congress (2019–2021)</option>
           </select>
-          <button onClick={handleSearch} className="btn btn-primary">
-            Search
-          </button>
+          <select
+            className="select"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortOption)}
+          >
+            <option value="name-asc">Name (A-Z)</option>
+            <option value="state-asc">State</option>
+            <option value="congresses-desc">Congresses Served (Most)</option>
+            <option value="congresses-asc">Congresses Served (Fewest)</option>
+          </select>
         </div>
-        <p className="text-xs text-vibe-dim mt-2">
-          Leave blank to browse all members. Click a member card to expand details.
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <p className="text-[11px] text-vibe-dim uppercase tracking-wider mb-2">Party</p>
+            <div className="flex flex-wrap gap-2">
+              <FilterToggle
+                label="All"
+                active={partyFilter === "all"}
+                onClick={() => setPartyFilter("all")}
+              />
+              <FilterToggle
+                label="Democrats"
+                active={partyFilter === "D"}
+                onClick={() => setPartyFilter("D")}
+              />
+              <FilterToggle
+                label="Republicans"
+                active={partyFilter === "R"}
+                onClick={() => setPartyFilter("R")}
+              />
+              <FilterToggle
+                label="Independents"
+                active={partyFilter === "I"}
+                onClick={() => setPartyFilter("I")}
+              />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[11px] text-vibe-dim uppercase tracking-wider mb-2">Chamber</p>
+            <div className="flex flex-wrap gap-2">
+              <FilterToggle
+                label="All"
+                active={chamberFilter === "all"}
+                onClick={() => setChamberFilter("all")}
+              />
+              <FilterToggle
+                label="House"
+                active={chamberFilter === "House"}
+                onClick={() => setChamberFilter("House")}
+              />
+              <FilterToggle
+                label="Senate"
+                active={chamberFilter === "Senate"}
+                onClick={() => setChamberFilter("Senate")}
+              />
+            </div>
+          </div>
+        </div>
+
+        <p className="text-xs text-vibe-dim mt-3">
+          Cached members load automatically. Search matches name or state only. Click a member card to expand details.
         </p>
       </div>
 
-      {search.error && (
+      {browse.error && (
         <div className="card border-vibe-nay/30">
-          <p className="text-sm text-vibe-nay">{search.error}</p>
+          <p className="text-sm text-vibe-nay">{browse.error}</p>
         </div>
       )}
 
-      {allMembers.length > 0 && (
+      {filteredMembers.length > 0 && (
         <div className="space-y-3">
           <p className="text-xs text-vibe-dim">
-            Showing {allMembers.length} of {totalCount} members
+            Showing {filteredMembers.length} of {allMembers.length} members
+            {browse.data?.source ? ` · ${browse.data.source.replace(/_/g, " ")}` : ""}
           </p>
 
-          {/* Grid with inline expansion */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-            {allMembers.map((m) => (
+            {filteredMembers.map((m) => (
               <MemberCard
                 key={m.bioguideId}
                 member={m}
@@ -194,31 +278,39 @@ export function MemberSearch() {
               />
             ))}
           </div>
-
-          {/* Load more */}
-          {hasMore && (
-            <div className="flex items-center justify-center gap-3 pt-2">
-              <button
-                onClick={handleLoadMore}
-                disabled={search.loading}
-                className="btn btn-primary"
-              >
-                {search.loading && isLoadMore.current
-                  ? "Loading..."
-                  : `Load more (${totalCount - allMembers.length} remaining)`}
-              </button>
-            </div>
-          )}
-
-          {search.loading && !isLoadMore.current && (
-            <LoadingSkeleton />
-          )}
         </div>
       )}
 
-      {/* Initial loading */}
-      {search.loading && allMembers.length === 0 && <LoadingSkeleton />}
+      {!browse.loading && !browse.error && allMembers.length > 0 && filteredMembers.length === 0 && (
+        <div className="card">
+          <p className="text-sm text-vibe-dim">
+            No members matched the current filters.
+          </p>
+        </div>
+      )}
+
+      {browse.loading && <LoadingSkeleton />}
     </div>
+  );
+}
+
+function FilterToggle({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`btn ${active ? "btn-primary" : "btn-ghost"}`}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -235,6 +327,14 @@ function MemberCard({
   detail: ReturnType<typeof useApi<MemberDetailResponse>> | null;
   memberVotes: ReturnType<typeof useApi<MemberVotesResponse>> | null;
 }) {
+  const chamber =
+    normalizeChamber(member.chamber) ??
+    (member.district == null ? "Senate" : "House");
+  const tenureLabel =
+    member.congressesServed != null
+      ? `${member.congressesServed} congress${member.congressesServed === 1 ? "" : "es"} served`
+      : null;
+
   return (
     <>
       <button
@@ -255,11 +355,15 @@ function MemberCard({
             <p className="text-sm font-medium truncate">{member.name}</p>
             <div className="flex items-center gap-2 mt-0.5">
               <PartyBadge party={member.party} />
+              <span className="badge bg-vibe-border text-vibe-dim">{chamber}</span>
               <span className="text-xs text-vibe-dim">
                 {member.state}
                 {member.district != null ? `-${member.district}` : ""}
               </span>
             </div>
+            {tenureLabel && (
+              <p className="text-[11px] text-vibe-dim mt-1">{tenureLabel}</p>
+            )}
           </div>
           <span className="text-xs text-vibe-dim shrink-0">
             {isExpanded ? "▲" : "▼"}
