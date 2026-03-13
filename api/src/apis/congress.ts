@@ -122,6 +122,24 @@ type CongressMemberLike = {
   terms?: { item?: Array<{ party?: string; partyName?: string; partyAbbreviation?: string }> };
 };
 
+type CongressMemberApiMember = {
+  bioguideId?: string;
+  name?: string;
+  party?: string;
+  partyName?: string;
+  partyHistory?: CongressPartyHistoryItem[];
+  state?: string;
+  district?: number;
+  depiction?: { imageUrl?: string };
+  [key: string]: unknown;
+};
+
+type CongressMembersResponse = {
+  members?: CongressMemberApiMember[];
+  pagination?: { count?: number; next?: string };
+  [key: string]: unknown;
+};
+
 function normalizePartyValue(raw?: string | null): string | null {
   if (!raw) return null;
   const cleaned = raw.trim();
@@ -159,8 +177,50 @@ function extractMemberParty(member: CongressMemberLike): string | null {
   return candidates.find((value): value is string => !!value) ?? null;
 }
 
+function normalizeCongressMembers(members: CongressMemberApiMember[]) {
+  return members.map((member) => ({
+    ...member,
+    party: extractMemberParty(member),
+  }));
+}
+
+async function fetchCongressMembersPage(
+  apiKey: string,
+  congressNum: string,
+  limit: number,
+  offset: number
+): Promise<CongressMembersResponse> {
+  const resp = await congressFetch(`/member/congress/${congressNum}`, apiKey, {
+    limit: limit.toString(),
+    offset: offset.toString(),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Congress API: ${resp.status}`);
+  }
+
+  return (await resp.json()) as CongressMembersResponse;
+}
+
+async function fetchAllCongressMembers(apiKey: string, congressNum: string): Promise<CongressMemberApiMember[]> {
+  const allMembers: CongressMemberApiMember[] = [];
+  const pageSize = 250;
+
+  for (let offset = 0; offset <= 5000; offset += pageSize) {
+    const data = await fetchCongressMembersPage(apiKey, congressNum, pageSize, offset);
+    const pageMembers = data.members ?? [];
+    allMembers.push(...pageMembers);
+
+    if (!data.pagination?.next || pageMembers.length < pageSize) {
+      break;
+    }
+  }
+
+  return allMembers;
+}
+
 // ── GET /api/congress/members ────────────────────────────────────────────────
-// List members — tries Supabase first, falls through to Congress.gov
+// List members — always fetch live Congress.gov data for correct per-congress counts
 congress.get("/members", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
@@ -169,72 +229,9 @@ congress.get("/members", async (c) => {
   const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
-  // Try Supabase first
-  if (hasSupabase(c.env)) {
-    try {
-      const sb = getSupabase(c.env);
-      const { data, count, error } = await sb
-        .from("members")
-        .select("*", { count: "exact" })
-        .eq("congress", parseInt(currentCongress, 10))
-        .order("name")
-        .range(offset, offset + limit - 1);
-
-      if (!error && data && data.length > 0) {
-        // If cache rows don't have party info, fall through to live API so we can rehydrate.
-        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
-        if (hasPartyCoverage) {
-          // Map Supabase rows to the same shape the frontend expects
-          const members = data.map((m) => ({
-            bioguideId: m.bioguide_id,
-            name: m.name,
-            party: normalizePartyValue(m.party) ?? m.party,
-            state: m.state,
-            district: m.district,
-            depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
-          }));
-          return c.json(
-            { members, count: count ?? members.length },
-            200,
-            { "Cache-Control": "public, max-age=3600" }
-          );
-        }
-      }
-    } catch {
-      // Supabase failed — fall through to live API
-    }
-  }
-
-  // Fallthrough: live Congress.gov API
-  const params: Record<string, string> = {
-    limit: limit.toString(),
-    offset: offset.toString(),
-  };
-  const path = `/member/congress/${currentCongress}`;
-
   try {
-    const resp = await congressFetch(path, apiKey, params);
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
-    }
-    const data = (await resp.json()) as {
-      members?: Array<{
-        bioguideId?: string;
-        name?: string;
-        party?: string;
-        partyName?: string;
-        partyHistory?: CongressPartyHistoryItem[];
-        state?: string;
-        district?: number;
-        depiction?: { imageUrl?: string };
-        [key: string]: unknown;
-      }>;
-    };
-
-    const normalizedMembers = (data.members ?? []).map((m) => ({
-      ...m,
-      party: extractMemberParty(m),
-    }));
+    const data = await fetchCongressMembersPage(apiKey, currentCongress, limit, offset);
+    const normalizedMembers = normalizeCongressMembers(data.members ?? []);
 
     // Cache members to Supabase in the background
     if (hasSupabase(c.env) && normalizedMembers.length) {
@@ -267,7 +264,7 @@ congress.get("/members", async (c) => {
 });
 
 // ── GET /api/congress/members/search ─────────────────────────────────────────
-// Search members by name — uses Supabase trigram search when available
+// Search members by name — scan live Congress.gov member pages for complete results
 congress.get("/members/search", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
@@ -277,72 +274,8 @@ congress.get("/members/search", async (c) => {
 
   const currentCongress = c.req.query("congress") ?? "119";
 
-  // Try Supabase first — much faster than fetching 250 members and filtering
-  if (hasSupabase(c.env)) {
-    try {
-      const sb = getSupabase(c.env);
-      const q = `%${query}%`;
-      const { data, error } = await sb
-        .from("members")
-        .select("*")
-        .eq("congress", parseInt(currentCongress, 10))
-        .or(`name.ilike.${q},state.ilike.${q},party.ilike.${q}`)
-        .order("name")
-        .limit(50);
-
-      if (!error && data && data.length > 0) {
-        const hasPartyCoverage = data.every((m) => !!normalizePartyValue(m.party));
-        if (hasPartyCoverage) {
-          const members = data.map((m) => ({
-            bioguideId: m.bioguide_id,
-            name: m.name,
-            party: normalizePartyValue(m.party) ?? m.party,
-            state: m.state,
-            district: m.district,
-            depiction: m.image_url ? { imageUrl: m.image_url } : undefined,
-          }));
-          return c.json(
-            { members, count: members.length },
-            200,
-            { "Cache-Control": "public, max-age=3600" }
-          );
-        }
-      }
-    } catch {
-      // Fall through to live API
-    }
-  }
-
-  // Fallthrough: fetch all members from Congress.gov and filter
-  const params: Record<string, string> = {
-    limit: "250",
-    offset: "0",
-  };
-  const path = `/member/congress/${currentCongress}`;
-
   try {
-    const resp = await congressFetch(path, apiKey, params);
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
-    }
-    const data = (await resp.json()) as {
-      members?: Array<{
-        name?: string;
-        state?: string;
-        party?: string;
-        partyName?: string;
-        partyHistory?: CongressPartyHistoryItem[];
-        bioguideId?: string;
-        district?: number;
-        depiction?: { imageUrl?: string };
-        [key: string]: unknown;
-      }>;
-    };
-
-    const normalizedMembers = (data.members ?? []).map((m) => ({
-      ...m,
-      party: extractMemberParty(m),
-    }));
+    const normalizedMembers = normalizeCongressMembers(await fetchAllCongressMembers(apiKey, currentCongress));
 
     const qLower = query.toLowerCase();
     const filtered = normalizedMembers.filter((m) => {
