@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
+import { buildBillLinks, formatBillLabel, formatVotePositionLabel, normalizeVotePosition } from "../lib/congress";
 
 interface MemberResult {
   name?: string;
@@ -46,6 +47,28 @@ interface MemberDetailResponse {
   };
 }
 
+interface MemberVoteRecord {
+  rollCallNumber: number;
+  date: string | null;
+  question: string | null;
+  description: string | null;
+  result: string | null;
+  position: string;
+  chamber: string;
+  bill?: {
+    congress?: string | number;
+    type?: string;
+    number?: string | number;
+    apiUrl?: string;
+  };
+}
+
+interface MemberVotesResponse {
+  bioguide_id: string;
+  votes?: MemberVoteRecord[];
+  count?: number;
+}
+
 const LIMIT = 50;
 
 export function MemberSearch() {
@@ -59,6 +82,7 @@ export function MemberSearch() {
 
   const search = useApi<MemberSearchResponse>();
   const detail = useApi<MemberDetailResponse>();
+  const memberVotes = useApi<MemberVotesResponse>();
 
   // Accumulate members across pages
   useEffect(() => {
@@ -106,6 +130,7 @@ export function MemberSearch() {
     }
     setExpandedId(bioguideId);
     detail.fetchData(`/api/congress/members/${bioguideId}`);
+    memberVotes.fetchData(`/api/congress/member-votes/${bioguideId}?congress=${congress}&limit=30`);
   };
 
   const hasMore = allMembers.length < totalCount && totalCount > 0;
@@ -165,6 +190,7 @@ export function MemberSearch() {
                 isExpanded={expandedId === m.bioguideId}
                 onClick={() => m.bioguideId && handleMemberClick(m.bioguideId)}
                 detail={expandedId === m.bioguideId ? detail : null}
+                memberVotes={expandedId === m.bioguideId ? memberVotes : null}
               />
             ))}
           </div>
@@ -201,11 +227,13 @@ function MemberCard({
   isExpanded,
   onClick,
   detail,
+  memberVotes,
 }: {
   member: MemberResult;
   isExpanded: boolean;
   onClick: () => void;
   detail: ReturnType<typeof useApi<MemberDetailResponse>> | null;
+  memberVotes: ReturnType<typeof useApi<MemberVotesResponse>> | null;
 }) {
   return (
     <>
@@ -244,7 +272,7 @@ function MemberCard({
         <div className="col-span-full">
           {detail?.loading && <LoadingSkeleton />}
           {detail?.data?.member && (
-            <MemberDetailCard member={detail.data.member} />
+            <MemberDetailCard member={detail.data.member} votingRecord={memberVotes} />
           )}
           {!detail?.loading && !detail?.data?.member && detail?.error && (
             <div className="card border-vibe-nay/30">
@@ -259,8 +287,10 @@ function MemberCard({
 
 function MemberDetailCard({
   member,
+  votingRecord,
 }: {
   member: NonNullable<MemberDetailResponse["member"]>;
+  votingRecord: ReturnType<typeof useApi<MemberVotesResponse>> | null;
 }) {
   const terms = member.terms ?? [];
   const latestTerm = terms[terms.length - 1];
@@ -280,6 +310,18 @@ function MemberDetailCard({
   const yearsServed = firstYear && lastYear ? lastYear - firstYear : null;
   const isCurrentSenator = chamber.toLowerCase().includes("senate");
   const isCurrentRep = chamber.toLowerCase().includes("house");
+  const recentVotes = votingRecord?.data?.votes ?? [];
+  const voteCounts = recentVotes.reduce(
+    (counts, vote) => {
+      const normalized = normalizeVotePosition(vote.position);
+      if (normalized === "yea") counts.yea += 1;
+      else if (normalized === "nay") counts.nay += 1;
+      else if (normalized === "present") counts.present += 1;
+      else if (normalized === "not-voting") counts.notVoting += 1;
+      return counts;
+    },
+    { yea: 0, nay: 0, present: 0, notVoting: 0 }
+  );
 
   return (
     <div className="card border-vibe-accent/30 mt-2">
@@ -400,6 +442,94 @@ function MemberDetailCard({
           )}
         </div>
       )}
+
+      <div className="mb-4">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <p className="text-xs text-vibe-dim uppercase tracking-wider">
+            Recent Voting Record
+          </p>
+          <span className="text-xs text-vibe-dim">
+            {votingRecord?.data?.count ?? recentVotes.length} recent vote(s)
+          </span>
+        </div>
+
+        {votingRecord?.loading && <LoadingSkeleton />}
+
+        {!votingRecord?.loading && recentVotes.length > 0 && (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+              <StatBox label="Yea" value={String(voteCounts.yea)} />
+              <StatBox label="Nay" value={String(voteCounts.nay)} />
+              <StatBox label="Present" value={String(voteCounts.present)} />
+              <StatBox label="Not Present" value={String(voteCounts.notVoting)} />
+            </div>
+            <div className="space-y-1 max-h-72 overflow-y-auto">
+              {recentVotes.map((vote, index) => {
+                const billLinks = vote.bill ? buildBillLinks(vote.bill) : null;
+                return (
+                  <div
+                    key={`${vote.chamber}-${vote.rollCallNumber}-${vote.date ?? index}`}
+                    className="rounded bg-vibe-surface px-3 py-2 text-xs"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <span className="badge bg-vibe-border text-vibe-text">
+                            {vote.chamber} Roll #{vote.rollCallNumber}
+                          </span>
+                          <span
+                            className={`badge ${
+                              normalizeVotePosition(vote.position) === "yea"
+                                ? "badge-yea"
+                                : normalizeVotePosition(vote.position) === "nay"
+                                ? "badge-nay"
+                                : "bg-vibe-border text-vibe-dim"
+                            }`}
+                          >
+                            {formatVotePositionLabel(vote.position)}
+                          </span>
+                        </div>
+                        <p className="font-medium text-vibe-text">
+                          {vote.question ?? vote.description ?? "Vote"}
+                        </p>
+                        <p className="text-vibe-dim mt-1">
+                          {vote.date ?? "Date unavailable"}
+                          {vote.result ? ` · ${vote.result}` : ""}
+                        </p>
+                        {vote.description && vote.question && (
+                          <p className="text-vibe-dim mt-1">{vote.description}</p>
+                        )}
+                      </div>
+                      {vote.bill && billLinks && (
+                        <a
+                          href={billLinks.detail}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-vibe-accent hover:underline shrink-0"
+                        >
+                          {formatBillLabel(vote.bill)}
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {!votingRecord?.loading && votingRecord?.error && (
+          <div className="card border-vibe-nay/30">
+            <p className="text-sm text-vibe-nay">{votingRecord.error}</p>
+          </div>
+        )}
+
+        {!votingRecord?.loading && !votingRecord?.error && recentVotes.length === 0 && (
+          <p className="text-xs text-vibe-dim italic">
+            No recent voting history was returned for this member.
+          </p>
+        )}
+      </div>
 
       <div className="mt-3 pt-3 border-t border-vibe-border">
         <p className="text-xs text-vibe-dim">
