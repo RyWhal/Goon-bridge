@@ -1114,6 +1114,7 @@ openfec.get("/contributions", async (c) => {
       : sortQuery === "date_asc"
         ? "contribution_receipt_date"
         : "-contribution_receipt_date";
+  const includeRefunds = c.req.query("include_refunds") === "true";
 
   const requestedPage = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
   const requestedPerPage = Math.max(1, Math.min(Number(c.req.query("limit") ?? "20") || 20, 100));
@@ -1138,6 +1139,15 @@ openfec.get("/contributions", async (c) => {
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
+    let cacheQuery = sb
+      .from("contributions")
+      .select("candidate_id, committee_id, committee_name, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
+      .eq("candidate_id", candidateId);
+
+    if (!includeRefunds) {
+      cacheQuery = cacheQuery.gt("contribution_amount", 0);
+    }
+
     const [{ data: latestRow, error: latestError }, { data: cachedRows, count, error: queryError }] =
       await Promise.all([
         sb
@@ -1147,10 +1157,7 @@ openfec.get("/contributions", async (c) => {
           .order("updated_at", { ascending: false })
           .limit(1)
           .maybeSingle(),
-        sb
-          .from("contributions")
-          .select("candidate_id, committee_id, committee_name, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
-          .eq("candidate_id", candidateId)
+        cacheQuery
           .order(sortColumn, { ascending, nullsFirst: false })
           .range(from, to),
       ]);
@@ -1289,7 +1296,16 @@ openfec.get("/contributions", async (c) => {
   if (contributorName) params["contributor_name"] = contributorName;
 
   const minAmount = c.req.query("min_amount");
-  if (minAmount) params["min_amount"] = minAmount;
+  if (minAmount) {
+    const parsedMinAmount = Number(minAmount);
+    if (Number.isFinite(parsedMinAmount)) {
+      params["min_amount"] = String(includeRefunds ? parsedMinAmount : Math.max(parsedMinAmount, 0.01));
+    } else {
+      params["min_amount"] = minAmount;
+    }
+  } else if (!includeRefunds) {
+    params["min_amount"] = "0.01";
+  }
 
   const maxAmount = c.req.query("max_amount");
   if (maxAmount) params["max_amount"] = maxAmount;
@@ -1437,6 +1453,7 @@ openfec.get("/contributions", async (c) => {
         source: "openfec_live",
         candidate_id: candidateId ?? null,
         committee_id: params["committee_id"] ?? null,
+        include_refunds: includeRefunds,
         page: requestedPage,
         per_page: requestedPerPage,
         sort_requested: sort,
