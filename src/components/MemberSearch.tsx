@@ -635,12 +635,6 @@ function MemberDetailCard({
         )}
       </div>
 
-      <div className="mt-3 pt-3 border-t border-vibe-border">
-        <p className="text-xs text-vibe-dim">
-          See this member's donors and votes side-by-side in the{" "}
-          <span className="text-vibe-money font-medium">Follow the Money</span> tab.
-        </p>
-      </div>
       <JsonViewer data={{ member }} label="Full API Response" />
     </div>
   );

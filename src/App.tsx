@@ -3,18 +3,15 @@ import { HealthCheck } from "./components/HealthCheck";
 import { MemberSearch } from "./components/MemberSearch";
 import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
-import { FollowTheMoney } from "./components/FollowTheMoney";
 import { ContextLookup } from "./components/ContextLookup";
 
 const TABS = [
   { id: "members", label: "Members" },
   { id: "bills", label: "Bills & Votes" },
   { id: "money", label: "Money" },
-  { id: "follow", label: "Follow the Money" },
-  { id: "context", label: "Cosmic Context" },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
+type TabId = (typeof TABS)[number]["id"] | "context";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("members");
@@ -65,15 +62,13 @@ export default function App() {
         {activeTab === "members" && <MemberSearch />}
         {activeTab === "bills" && <BillSearch />}
         {activeTab === "money" && <FecSearch />}
-        {activeTab === "follow" && <FollowTheMoney />}
         {activeTab === "context" && <ContextLookup />}
       </main>
 
       {/* Footer */}
       <footer className="border-t border-vibe-border mt-auto">
         <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-vibe-dim">
-          Data sourced from Congress.gov, OpenFEC, Open-Meteo, USGS, and the
-          literal moon. Correlation does not equal causation. Probably.
+          Correlation does not equal causation. Probably.
         </div>
       </footer>
     </div>
