@@ -3,12 +3,14 @@ import { HealthCheck } from "./components/HealthCheck";
 import { MemberSearch } from "./components/MemberSearch";
 import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
+import { CorporationSearch } from "./components/CorporationSearch";
 import { ContextLookup } from "./components/ContextLookup";
 
 const TABS = [
   { id: "members", label: "Members" },
   { id: "bills", label: "Bills & Votes" },
-  { id: "money", label: "Money" },
+  { id: "money", label: "Campaign Money" },
+  { id: "corporations", label: "Corporations" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"] | "context";
@@ -101,6 +103,7 @@ export default function App() {
         {activeTab === "members" && <MemberSearch />}
         {activeTab === "bills" && <BillSearch />}
         {activeTab === "money" && <FecSearch />}
+        {activeTab === "corporations" && <CorporationSearch />}
         {activeTab === "context" && <ContextLookup />}
       </main>
 
