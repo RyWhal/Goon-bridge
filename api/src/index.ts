@@ -5,6 +5,7 @@ import { securityHeaders } from "./middleware/security";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { congress } from "./apis/congress";
 import { openfec } from "./apis/openfec";
+import { finnhub } from "./apis/finnhub";
 import { weather } from "./apis/weather";
 import { earthquakes } from "./apis/earthquakes";
 import { sunrise } from "./apis/sunrise";
@@ -62,6 +63,7 @@ app.get("/api/health", async (c) => {
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,
+      finnhub: !!c.env.FINNHUB_API_KEY,
       supabase: supabaseStatus,
       weather: true,
       earthquakes: true,
@@ -75,6 +77,7 @@ app.get("/api/health", async (c) => {
 // ── Mount API routes ─────────────────────────────────────────────────────────
 app.route("/api/congress", congress);
 app.route("/api/fec", openfec);
+app.route("/api/finnhub", finnhub);
 app.route("/api/weather", weather);
 app.route("/api/earthquakes", earthquakes);
 app.route("/api/sunrise", sunrise);

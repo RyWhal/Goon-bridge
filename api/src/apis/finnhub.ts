@@ -1,0 +1,193 @@
+import { Hono } from "hono";
+import type { Env } from "../types";
+
+const finnhub = new Hono<Env>();
+
+const BASE = "https://finnhub.io/api/v1";
+const FINNHUB_FETCH_TIMEOUT_MS = 12_000;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+class FinnhubTimeoutError extends Error {
+  constructor(message = "Finnhub request timed out") {
+    super(message);
+    this.name = "FinnhubTimeoutError";
+  }
+}
+
+interface FinnhubLobbyingRecord {
+  symbol?: string | null;
+  name?: string | null;
+  description?: string | null;
+  country?: string | null;
+  uuid?: string | null;
+  year?: number | null;
+  period?: string | null;
+  type?: string | null;
+  documentUrl?: string | null;
+  income?: number | null;
+  expenses?: number | null;
+  postedName?: string | null;
+  dtPosted?: string | null;
+  clientId?: string | null;
+  registrantId?: string | null;
+  senateId?: string | null;
+  houseRegistrantId?: string | null;
+}
+
+async function finnhubFetch(
+  path: string,
+  apiKey: string,
+  params: Record<string, string>
+): Promise<Response> {
+  const url = new URL(`${BASE}${path}`);
+  url.searchParams.set("token", apiKey);
+
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FINNHUB_FETCH_TIMEOUT_MS);
+
+  try {
+    return await fetch(url.toString(), { signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new FinnhubTimeoutError(
+        `Finnhub request timed out after ${FINNHUB_FETCH_TIMEOUT_MS}ms`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readErrorDetail(resp: Response): Promise<string | null> {
+  const raw = await resp.text().catch(() => "");
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: string;
+      message?: string;
+      detail?: string;
+    };
+    return parsed.error ?? parsed.message ?? parsed.detail ?? raw.slice(0, 300);
+  } catch {
+    return raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300) || null;
+  }
+}
+
+function isValidDate(value: string | undefined): value is string {
+  if (!value || !DATE_RE.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed);
+}
+
+finnhub.get("/lobbying", async (c) => {
+  const apiKey = c.env.FINNHUB_API_KEY;
+  if (!apiKey) return c.json({ error: "Finnhub API key not configured" }, 500);
+
+  const rawSymbol = c.req.query("symbol")?.trim().toUpperCase();
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+
+  if (!rawSymbol) return c.json({ error: "Missing required query parameter 'symbol'" }, 400);
+  if (!isValidDate(from)) return c.json({ error: "Invalid 'from' date (use YYYY-MM-DD)" }, 400);
+  if (!isValidDate(to)) return c.json({ error: "Invalid 'to' date (use YYYY-MM-DD)" }, 400);
+  if (Date.parse(`${from}T00:00:00Z`) > Date.parse(`${to}T00:00:00Z`)) {
+    return c.json({ error: "'from' date must be on or before 'to' date" }, 400);
+  }
+
+  try {
+    const resp = await finnhubFetch("/stock/lobbying", apiKey, {
+      symbol: rawSymbol,
+      from,
+      to,
+    });
+
+    if (!resp.ok) {
+      const detail = await readErrorDetail(resp);
+      return c.json(
+        {
+          error: `Finnhub API: ${resp.status}`,
+          ...(detail ? { detail } : {}),
+        },
+        502
+      );
+    }
+
+    const raw = (await resp.json()) as {
+      data?: FinnhubLobbyingRecord[];
+      symbol?: string;
+    };
+
+    const data = Array.isArray(raw.data) ? raw.data : [];
+    const records = data.map((item) => {
+      const inSenate = Boolean(item.senateId?.trim());
+      const inHouse = Boolean(item.houseRegistrantId?.trim());
+      const chambers = [
+        ...(inSenate ? ["Senate"] : []),
+        ...(inHouse ? ["House"] : []),
+      ];
+
+      return {
+        symbol: item.symbol ?? rawSymbol,
+        name: item.name ?? null,
+        description: item.description ?? null,
+        country: item.country ?? null,
+        uuid: item.uuid ?? null,
+        year: item.year ?? null,
+        period: item.period ?? null,
+        type: item.type ?? null,
+        documentUrl: item.documentUrl ?? null,
+        income: item.income ?? null,
+        expenses: item.expenses ?? null,
+        postedName: item.postedName ?? null,
+        dtPosted: item.dtPosted ?? null,
+        clientId: item.clientId ?? null,
+        registrantId: item.registrantId ?? null,
+        senateId: item.senateId ?? null,
+        houseRegistrantId: item.houseRegistrantId ?? null,
+        chambers,
+        chamberLabel:
+          chambers.length === 2 ? "Senate + House" : chambers[0] ?? "Unknown",
+      };
+    });
+
+    const senateCount = records.filter((item) => item.chambers.includes("Senate")).length;
+    const houseCount = records.filter((item) => item.chambers.includes("House")).length;
+
+    return c.json(
+      {
+        symbol: raw.symbol ?? rawSymbol,
+        from,
+        to,
+        count: records.length,
+        summary: {
+          senateCount,
+          houseCount,
+          dualFiledCount: records.filter((item) => item.chambers.length === 2).length,
+        },
+        data: records,
+      },
+      200,
+      { "Cache-Control": "public, max-age=21600" }
+    );
+  } catch (error) {
+    if (error instanceof FinnhubTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
+
+    return c.json(
+      {
+        error: "Failed to fetch from Finnhub API",
+        detail: error instanceof Error ? error.message : String(error),
+      },
+      502
+    );
+  }
+});
+
+export { finnhub };
