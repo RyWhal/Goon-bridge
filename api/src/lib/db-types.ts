@@ -25,6 +25,12 @@ export interface Database {
         Update: Partial<MemberVotesInsert>;
         Relationships: [];
       };
+      member_vote_stats: {
+        Row: MemberVoteStatsRow;
+        Insert: MemberVoteStatsInsert;
+        Update: Partial<MemberVoteStatsInsert>;
+        Relationships: [];
+      };
       bills: {
         Row: BillsRow;
         Insert: BillsInsert;
@@ -54,7 +60,14 @@ export interface Database {
         Relationships: [];
       };
     };
-    Functions: Record<string, never>;
+    Functions: {
+      refresh_member_vote_stats: {
+        Args: {
+          target_bioguide_ids?: string[] | null;
+        };
+        Returns: number;
+      };
+    };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };
@@ -140,6 +153,46 @@ interface MemberVotesInsert {
   vote_id: number;
   bioguide_id: string;
   position: string;
+}
+
+// ── Member Vote Stats ────────────────────────────────────────────────────────
+
+interface MemberVoteStatsRow {
+  bioguide_id: string;
+  total_votes: number;
+  yea_votes: number;
+  nay_votes: number;
+  present_votes: number;
+  not_voting_votes: number;
+  unknown_votes: number;
+  attended_votes: number;
+  attendance_rate: number;
+  house_votes: number;
+  senate_votes: number;
+  first_vote_date: string | null;
+  last_vote_date: string | null;
+  first_congress: number | null;
+  last_congress: number | null;
+  updated_at: string;
+}
+
+interface MemberVoteStatsInsert {
+  bioguide_id: string;
+  total_votes?: number;
+  yea_votes?: number;
+  nay_votes?: number;
+  present_votes?: number;
+  not_voting_votes?: number;
+  unknown_votes?: number;
+  attended_votes?: number;
+  attendance_rate?: number;
+  house_votes?: number;
+  senate_votes?: number;
+  first_vote_date?: string | null;
+  last_vote_date?: string | null;
+  first_congress?: number | null;
+  last_congress?: number | null;
+  updated_at?: string;
 }
 
 // ── Bills ────────────────────────────────────────────────────────────────────
@@ -263,6 +316,7 @@ interface MemberVotingRecordRow {
   member_name: string;
   party: string | null;
   state: string | null;
+  vote_id: number;
   congress: number;
   chamber: string;
   roll_call_number: number;
@@ -270,5 +324,11 @@ interface MemberVotingRecordRow {
   question: string | null;
   vote_description: string | null;
   result: string | null;
+  bill_congress: number | null;
+  bill_type: string | null;
+  bill_number: number | null;
+  bill_title: string | null;
+  policy_area: string | null;
   position: string;
+  normalized_position: string;
 }

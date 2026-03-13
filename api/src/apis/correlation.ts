@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
+import type { MemberVoteStats } from "../lib/member-votes";
 import { getSupabase } from "../lib/supabase";
 
 const correlation = new Hono<Env>();
@@ -15,7 +16,7 @@ correlation.get("/member/:bioguideId", async (c) => {
   const sb = getSupabase(c.env);
 
   // Run all queries in parallel
-  const [memberRes, donorsRes, votesRes, fecRes] = await Promise.all([
+  const [memberRes, donorsRes, votesRes, fecRes, voteStatsRes] = await Promise.all([
     // 1. Member info
     sb.from("members").select("*").eq("bioguide_id", bioguideId).single(),
 
@@ -40,6 +41,9 @@ correlation.get("/member/:bioguideId", async (c) => {
       .from("fec_candidates")
       .select("candidate_id, name, party, state, office, election_years")
       .eq("bioguide_id", bioguideId),
+
+    // 5. Durable vote summary for downstream vibe checks
+    sb.from("member_vote_stats").select("*").eq("bioguide_id", bioguideId).maybeSingle(),
   ]);
 
   if (memberRes.error) {
@@ -49,6 +53,7 @@ correlation.get("/member/:bioguideId", async (c) => {
   // If the voting record cache is empty, trigger a live fetch from Congress.gov
   // so the Follow the Money page isn't perpetually blank.
   let recentVotes = votesRes.data ?? [];
+  let voteStats = voteStatsRes.data as MemberVoteStats | null;
   if (recentVotes.length === 0 && c.env.CONGRESS_API_KEY) {
     try {
       // Determine member's chamber from DB
@@ -61,6 +66,7 @@ correlation.get("/member/:bioguideId", async (c) => {
         if (mvResp.ok) {
           const mvData = (await mvResp.json()) as {
             votes?: Array<{
+              congress?: number;
               rollCallNumber: number;
               date: string | null;
               question: string | null;
@@ -69,6 +75,7 @@ correlation.get("/member/:bioguideId", async (c) => {
               position: string;
               chamber: string;
             }>;
+            stats?: MemberVoteStats;
           };
           if (mvData.votes?.length) {
             recentVotes = mvData.votes.map((v) => ({
@@ -86,6 +93,9 @@ correlation.get("/member/:bioguideId", async (c) => {
               position: v.position,
             }));
           }
+          if (mvData.stats) {
+            voteStats = mvData.stats;
+          }
         }
       }
     } catch {
@@ -99,6 +109,7 @@ correlation.get("/member/:bioguideId", async (c) => {
       fec_candidates: fecRes.data ?? [],
       top_donors: donorsRes.data ?? [],
       recent_votes: recentVotes,
+      vote_stats: voteStats,
     },
     200,
     { "Cache-Control": "public, max-age=1800" }
@@ -148,7 +159,7 @@ correlation.get("/member/:bioguideId/votes", async (c) => {
 
   let query = sb
     .from("member_voting_record")
-    .select("*")
+    .select("*", { count: "exact" })
     .eq("bioguide_id", bioguideId)
     .order("vote_date", { ascending: false })
     .limit(limit);
@@ -157,14 +168,22 @@ correlation.get("/member/:bioguideId/votes", async (c) => {
     query = query.eq("congress", parseInt(congress, 10));
   }
 
-  const { data, error } = await query;
+  const [{ data, error, count }, statsRes] = await Promise.all([
+    query,
+    sb.from("member_vote_stats").select("*").eq("bioguide_id", bioguideId).maybeSingle(),
+  ]);
 
   if (error) {
     return c.json({ error: error.message }, 500);
   }
 
   return c.json(
-    { bioguide_id: bioguideId, votes: data ?? [], count: data?.length ?? 0 },
+    {
+      bioguide_id: bioguideId,
+      votes: data ?? [],
+      count: count ?? data?.length ?? 0,
+      stats: statsRes.data ?? undefined,
+    },
     200,
     { "Cache-Control": "public, max-age=1800" }
   );
