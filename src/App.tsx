@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { HealthCheck } from "./components/HealthCheck";
 import { MemberSearch } from "./components/MemberSearch";
 import { BillSearch } from "./components/BillSearch";
@@ -12,9 +12,25 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"] | "context";
+type Theme = "dark" | "light";
+
+const THEME_STORAGE_KEY = "goon-bridge-theme";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("members");
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") {
+      return "light";
+    }
+
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return storedTheme === "dark" ? "dark" : "light";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   return (
     <div className="min-h-screen">
@@ -31,7 +47,30 @@ export default function App() {
                 Phase 1
               </span>
             </div>
-            <HealthCheck />
+            <div className="flex items-center gap-3">
+              <label className="inline-flex items-center gap-2 rounded-full border border-vibe-border bg-vibe-surface/80 px-2 py-1 text-[11px] uppercase tracking-[0.22em] text-vibe-dim">
+                <span className={theme === "light" ? "text-vibe-accent" : ""}>Light</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={theme === "light"}
+                  aria-label="Toggle light theme"
+                  onClick={() => setTheme((currentTheme) => (currentTheme === "light" ? "dark" : "light"))}
+                  className={`relative h-5 w-9 rounded-full border transition-colors ${
+                    theme === "light"
+                      ? "border-vibe-accent/40 bg-vibe-accent/90"
+                      : "border-vibe-border bg-vibe-bg"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                      theme === "light" ? "translate-x-[18px]" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+              </label>
+              <HealthCheck />
+            </div>
           </div>
         </div>
       </header>
