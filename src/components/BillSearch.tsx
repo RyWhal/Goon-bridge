@@ -285,38 +285,6 @@ function dedupeRecordedVotes(actions?: BillActionItem[]) {
   );
 }
 
-function getCrossPartyVoters(members: NormalizedVoteMember[]) {
-  const partyGroups = new Map<string, NormalizedVoteMember[]>();
-
-  for (const member of members) {
-    if (!member.party || member.normalizedPosition === "unknown") continue;
-    const current = partyGroups.get(member.party) ?? [];
-    current.push(member);
-    partyGroups.set(member.party, current);
-  }
-
-  const crossers: NormalizedVoteMember[] = [];
-
-  for (const [, partyMembers] of partyGroups) {
-    if (partyMembers.length < 3) continue;
-
-    const counts = new Map<NormalizedVotePosition, number>();
-    for (const member of partyMembers) {
-      counts.set(member.normalizedPosition, (counts.get(member.normalizedPosition) ?? 0) + 1);
-    }
-
-    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    if (sorted.length < 2 || sorted[0][1] === sorted[1][1]) continue;
-
-    const majorityPosition = sorted[0][0];
-    crossers.push(
-      ...partyMembers.filter((member) => member.normalizedPosition !== majorityPosition)
-    );
-  }
-
-  return crossers.sort((a, b) => a.displayName.localeCompare(b.displayName));
-}
-
 function getVoteChangeSummaries(voteSnapshots: VoteSnapshot[]): VoteChangeSummary[] {
   const chronologicallySorted = [...voteSnapshots].sort((a, b) =>
     (a.date ?? "").localeCompare(b.date ?? "")
@@ -1158,8 +1126,6 @@ function RecordedVoteCard({
 
   const members = useMemo(() => getVoteMembers(detail.data?.vote), [detail.data]);
   const totals = getVoteTotals(detail.data?.vote);
-  const crossPartyVoters = useMemo(() => getCrossPartyVoters(members), [members]);
-
   useEffect(() => {
     if (!detail.data?.vote) return;
     onLoaded({
@@ -1234,24 +1200,6 @@ function RecordedVoteCard({
                 colorClass="text-vibe-dim"
               />
             </div>
-
-            {crossPartyVoters.length > 0 && (
-              <div className="section-shell border-vibe-money/30 bg-vibe-money/[0.05]">
-                <p className="text-[10px] text-vibe-money uppercase tracking-wide mb-2">
-                  Across Party Lines
-                </p>
-                <p className="text-xs text-vibe-dim leading-relaxed">
-                  {crossPartyVoters
-                    .map(
-                      (member) =>
-                        `${member.displayName} (${[member.party, member.state]
-                          .filter(Boolean)
-                          .join("-")}, ${formatVotePositionLabel(member.rawPosition)})`
-                    )
-                    .join("; ")}
-                </p>
-              </div>
-            )}
 
             {members.length > 0 ? (
               <div className="space-y-2">
