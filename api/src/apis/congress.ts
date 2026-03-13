@@ -278,6 +278,7 @@ type CachedBillRow = Record<string, unknown>;
 
 const BILL_SCAN_PAGE_SIZE = 250;
 const BILL_SCAN_MAX_OFFSET = 20000;
+const BILL_METADATA_FETCH_BUDGET = 20;
 
 function normalizeText(value: string | undefined | null): string {
   return (value ?? "").trim().toLowerCase();
@@ -1423,6 +1424,7 @@ congress.get("/bills", async (c) => {
   const hasSummaryFilters = Boolean(status || latestAction);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
   const requiresScan = hasSummaryFilters || hasMetadataFilters;
+  const requiredMatches = offset + limit + 1;
 
   try {
     if (!requiresScan) {
@@ -1460,6 +1462,9 @@ congress.get("/bills", async (c) => {
     const cacheRowsToUpsert: Array<Record<string, unknown>> = [];
     let matchedCount = 0;
     let scannedCount = 0;
+    let hasMore = false;
+    let metadataFetches = 0;
+    let truncatedForBudget = false;
 
     for (let scanOffset = 0; scanOffset <= BILL_SCAN_MAX_OFFSET; scanOffset += BILL_SCAN_PAGE_SIZE) {
       const data = await fetchCongressBillsPage(
@@ -1500,6 +1505,11 @@ congress.get("/bills", async (c) => {
 
             const identity = getBillIdentity(entry.rawBill);
             if (!identity) return null;
+            if (metadataFetches >= BILL_METADATA_FETCH_BUDGET) {
+              truncatedForBudget = true;
+              return null;
+            }
+            metadataFetches += 1;
 
             const detailedBill =
               (await fetchCongressBillDetail(apiKey, identity.congress, identity.type, identity.number)) ??
@@ -1526,9 +1536,13 @@ congress.get("/bills", async (c) => {
           matchedBills.push(bill);
         }
         matchedCount += 1;
+        if (matchedCount >= requiredMatches) {
+          hasMore = true;
+          break;
+        }
       }
 
-      if (!data.pagination?.next || pageBills.length < BILL_SCAN_PAGE_SIZE) {
+      if (hasMore || truncatedForBudget || !data.pagination?.next || pageBills.length < BILL_SCAN_PAGE_SIZE) {
         break;
       }
     }
@@ -1540,12 +1554,17 @@ congress.get("/bills", async (c) => {
     return c.json(
       {
         bills: matchedBills,
-        count: matchedCount,
+        count: hasMore || truncatedForBudget ? undefined : matchedCount,
+        notice: truncatedForBudget
+          ? "Filtered results were capped to stay within production runtime limits. Browse further or warm the bill cache for broader sponsor and committee searches."
+          : hasMore
+            ? "Filtered pagination is running in windowed mode in production, so total counts are omitted until the full result set has been scanned."
+            : undefined,
         pagination: {
           offset,
           limit,
-          count: matchedCount,
-          hasMore: offset + limit < matchedCount,
+          count: hasMore || truncatedForBudget ? undefined : matchedCount,
+          hasMore: hasMore || offset + limit < matchedCount,
           filtered: true,
           scanned: scannedCount,
         },

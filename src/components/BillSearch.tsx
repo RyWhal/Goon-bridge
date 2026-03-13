@@ -507,13 +507,13 @@ export function BillSearch() {
     actions.fetchData(`${path}/actions?limit=250`);
   };
 
-  const totalCount = list.data?.pagination?.count ?? list.data?.count ?? 0;
+  const totalCount = list.data?.pagination?.count ?? list.data?.count;
   const pageSize = Number.parseInt(submittedFilters.limit, 10);
   const currentCount = list.data?.bills?.length ?? 0;
   const pageStart = currentCount > 0 ? offset + 1 : 0;
   const pageEnd = offset + currentCount;
   const currentPage = Math.floor(offset / pageSize) + 1;
-  const totalPages = totalCount > 0 ? Math.ceil(totalCount / pageSize) : 0;
+  const totalPages = totalCount != null && totalCount > 0 ? Math.ceil(totalCount / pageSize) : null;
   const hasMore = Boolean(list.data?.pagination?.hasMore);
 
   return (
@@ -648,12 +648,14 @@ export function BillSearch() {
         <div className="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm">
             <p className="font-medium">
-              {totalCount > 0
+              {totalCount != null && totalCount > 0
                 ? `Showing ${pageStart}-${pageEnd} of ${totalCount} bills`
-                : "No bills matched this search"}
+                : currentCount > 0
+                  ? `Showing ${pageStart}-${pageEnd} bills`
+                  : "No bills matched this search"}
             </p>
             <p className="text-xs text-vibe-dim mt-1">
-              {totalPages > 0 ? `Page ${currentPage} of ${totalPages}` : "Page 1"}
+              {totalPages ? `Page ${currentPage} of ${totalPages}` : `Page ${currentPage}`}
               {list.data?.pagination?.filtered
                 ? ` · filtered scan across ${list.data.pagination.scanned ?? 0} bills`
                 : ""}
