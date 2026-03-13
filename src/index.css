@@ -11,7 +11,30 @@
 
 @layer components {
   .card {
-    @apply bg-vibe-surface border border-vibe-border rounded-lg p-4;
+    @apply bg-vibe-surface border border-vibe-border rounded-lg p-4 shadow-[0_0_0_1px_rgba(139,92,246,0.04),0_18px_40px_rgba(0,0,0,0.18)];
+  }
+
+  .section-shell {
+    @apply rounded-xl border border-vibe-border/80 bg-vibe-bg/35 p-4;
+    box-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.06);
+  }
+
+  .section-shell-accent {
+    @apply rounded-xl border border-vibe-accent/20 bg-vibe-accent/[0.05] p-4;
+    box-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.1);
+  }
+
+  .section-shell-cosmic {
+    @apply rounded-xl border border-vibe-cosmic/30 bg-vibe-cosmic/[0.06] p-4;
+    box-shadow: inset 0 1px 0 rgba(245, 158, 11, 0.1);
+  }
+
+  .stat-tile {
+    @apply rounded-lg border border-vibe-border/70 bg-vibe-surface/80 px-3 py-2;
+  }
+
+  .list-panel {
+    @apply rounded-lg border border-vibe-border/70 bg-vibe-surface/55 p-2;
   }
 
   .btn {

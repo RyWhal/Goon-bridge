@@ -153,6 +153,17 @@ interface BillsRow {
   policy_area: string | null;
   latest_action_text: string | null;
   latest_action_date: string | null;
+  origin_chamber: string | null;
+  update_date: string | null;
+  introduced_date: string | null;
+  sponsor_bioguide_id: string | null;
+  sponsor_name: string | null;
+  sponsor_party: string | null;
+  sponsor_state: string | null;
+  committee_names: string[] | null;
+  bill_status: string | null;
+  bill_status_label: string | null;
+  bill_status_step: number | null;
   updated_at: string;
 }
 
@@ -165,6 +176,17 @@ interface BillsInsert {
   policy_area?: string | null;
   latest_action_text?: string | null;
   latest_action_date?: string | null;
+  origin_chamber?: string | null;
+  update_date?: string | null;
+  introduced_date?: string | null;
+  sponsor_bioguide_id?: string | null;
+  sponsor_name?: string | null;
+  sponsor_party?: string | null;
+  sponsor_state?: string | null;
+  committee_names?: string[] | null;
+  bill_status?: string | null;
+  bill_status_label?: string | null;
+  bill_status_step?: number | null;
   updated_at?: string;
 }
 
