@@ -3,30 +3,87 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    color-scheme: dark;
+    --vibe-bg: 10 10 15;
+    --vibe-surface: 18 18 26;
+    --vibe-border: 30 30 46;
+    --vibe-dim: 107 114 128;
+    --vibe-text: 229 231 235;
+    --vibe-accent: 139 92 246;
+    --vibe-yea: 34 197 94;
+    --vibe-nay: 239 68 68;
+    --vibe-cosmic: 245 158 11;
+    --vibe-money: 168 85 247;
+    --vibe-pattern: rgba(255, 255, 255, 0.015);
+    --vibe-card-shadow:
+      0 0 0 1px rgba(139, 92, 246, 0.04),
+      0 18px 40px rgba(0, 0, 0, 0.18);
+    --vibe-section-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.06);
+    --vibe-accent-section-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.1);
+    --vibe-cosmic-section-shadow: inset 0 1px 0 rgba(245, 158, 11, 0.1);
+    --vibe-scrollbar: #1e1e2e;
+    --vibe-scrollbar-hover: #2e2e3e;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --vibe-bg: 245 247 252;
+    --vibe-surface: 255 255 255;
+    --vibe-border: 208 216 230;
+    --vibe-dim: 90 102 122;
+    --vibe-text: 21 29 44;
+    --vibe-accent: 124 58 237;
+    --vibe-yea: 22 163 74;
+    --vibe-nay: 220 38 38;
+    --vibe-cosmic: 217 119 6;
+    --vibe-money: 147 51 234;
+    --vibe-pattern: rgba(99, 102, 241, 0.05);
+    --vibe-card-shadow:
+      0 0 0 1px rgba(124, 58, 237, 0.06),
+      0 18px 38px rgba(148, 163, 184, 0.18);
+    --vibe-section-shadow: inset 0 1px 0 rgba(124, 58, 237, 0.08);
+    --vibe-accent-section-shadow: inset 0 1px 0 rgba(124, 58, 237, 0.14);
+    --vibe-cosmic-section-shadow: inset 0 1px 0 rgba(217, 119, 6, 0.12);
+    --vibe-scrollbar: #cbd5e1;
+    --vibe-scrollbar-hover: #94a3b8;
+  }
+
+  html {
+    background-color: rgb(var(--vibe-bg));
+  }
+
   body {
     @apply bg-vibe-bg text-vibe-text font-mono antialiased;
-    background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.015'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    background-image:
+      radial-gradient(circle at top, rgb(var(--vibe-accent) / 0.1), transparent 32%),
+      linear-gradient(var(--vibe-pattern) 1px, transparent 1px),
+      linear-gradient(90deg, var(--vibe-pattern) 1px, transparent 1px);
+    background-size: auto, 60px 60px, 60px 60px;
+    background-position: 0 0, 0 0, 0 0;
+    background-attachment: fixed;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-vibe-surface border border-vibe-border rounded-lg p-4 shadow-[0_0_0_1px_rgba(139,92,246,0.04),0_18px_40px_rgba(0,0,0,0.18)];
+    @apply bg-vibe-surface border border-vibe-border rounded-lg p-4;
+    box-shadow: var(--vibe-card-shadow);
   }
 
   .section-shell {
     @apply rounded-xl border border-vibe-border/80 bg-vibe-bg/35 p-4;
-    box-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.06);
+    box-shadow: var(--vibe-section-shadow);
   }
 
   .section-shell-accent {
     @apply rounded-xl border border-vibe-accent/20 bg-vibe-accent/[0.05] p-4;
-    box-shadow: inset 0 1px 0 rgba(139, 92, 246, 0.1);
+    box-shadow: var(--vibe-accent-section-shadow);
   }
 
   .section-shell-cosmic {
     @apply rounded-xl border border-vibe-cosmic/30 bg-vibe-cosmic/[0.06] p-4;
-    box-shadow: inset 0 1px 0 rgba(245, 158, 11, 0.1);
+    box-shadow: var(--vibe-cosmic-section-shadow);
   }
 
   .stat-tile {
@@ -99,10 +156,10 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e1e2e;
+  background: var(--vibe-scrollbar);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2e2e3e;
+  background: var(--vibe-scrollbar-hover);
 }

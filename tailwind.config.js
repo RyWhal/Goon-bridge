@@ -5,16 +5,16 @@ export default {
     extend: {
       colors: {
         vibe: {
-          bg: "#0a0a0f",
-          surface: "#12121a",
-          border: "#1e1e2e",
-          dim: "#6b7280",
-          text: "#e5e7eb",
-          accent: "#8b5cf6",
-          yea: "#22c55e",
-          nay: "#ef4444",
-          cosmic: "#f59e0b",
-          money: "#a855f7",
+          bg: "rgb(var(--vibe-bg) / <alpha-value>)",
+          surface: "rgb(var(--vibe-surface) / <alpha-value>)",
+          border: "rgb(var(--vibe-border) / <alpha-value>)",
+          dim: "rgb(var(--vibe-dim) / <alpha-value>)",
+          text: "rgb(var(--vibe-text) / <alpha-value>)",
+          accent: "rgb(var(--vibe-accent) / <alpha-value>)",
+          yea: "rgb(var(--vibe-yea) / <alpha-value>)",
+          nay: "rgb(var(--vibe-nay) / <alpha-value>)",
+          cosmic: "rgb(var(--vibe-cosmic) / <alpha-value>)",
+          money: "rgb(var(--vibe-money) / <alpha-value>)",
         },
       },
       fontFamily: {
