@@ -1,6 +1,17 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
+import {
+  buildBillLinks,
+  formatBillLabel,
+  formatMemberDisplayName,
+  formatVotePositionLabel,
+  normalizePartyValue,
+  normalizeVotePosition,
+  parseBillUrl,
+  resolveBillReference,
+  type NormalizedVotePosition,
+} from "../lib/congress";
 
 interface BillItem {
   congress?: number;
@@ -34,6 +45,8 @@ interface BillDetailResponse {
     number?: string | number;
     title?: string;
     introducedDate?: string;
+    updateDate?: string;
+    originChamber?: string;
     sponsors?: Array<{
       bioguideId?: string;
       fullName?: string;
@@ -53,6 +66,8 @@ interface BillDetailResponse {
     committees?: { count?: number };
     actions?: { count?: number };
     laws?: Array<{ number?: string; type?: string }>;
+    summaries?: { count?: number; url?: string };
+    textVersions?: { count?: number; url?: string };
     url?: string;
   };
 }
@@ -62,70 +77,256 @@ interface CosponsorListResponse {
   pagination?: { count?: number };
 }
 
+interface RecordedVoteRef {
+  chamber?: string;
+  congress?: string | number;
+  rollNumber?: string | number;
+  sessionNumber?: string | number;
+  date?: string;
+}
+
+interface BillActionItem {
+  actionDate?: string;
+  text?: string;
+  recordedVotes?: RecordedVoteRef[];
+}
+
 interface BillActionsResponse {
-  actions?: Array<{
-    actionDate?: string;
-    text?: string;
-    recordedVotes?: Array<{
-      chamber?: string;
-      congress?: string | number;
-      rollNumber?: string | number;
-      sessionNumber?: string | number;
-      date?: string;
-    }>;
-  }>;
+  actions?: BillActionItem[];
+}
+
+interface VoteMember {
+  bioguideId?: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  name?: string;
+  party?: string;
+  state?: string;
+  votePosition?: string;
+  memberVoted?: string;
 }
 
 interface VoteDetailResponse {
   vote?: {
+    congress?: number;
+    chamber?: string;
+    date?: string;
+    question?: string;
+    description?: string;
+    result?: string;
     totalYea?: number;
     totalNay?: number;
     totalNotVoting?: number;
-    members?: Array<{
-      fullName?: string;
-      party?: string;
-      state?: string;
-      votePosition?: string;
-    }>;
+    totalPresent?: number;
+    totals?: {
+      yea?: number;
+      nay?: number;
+      not_voting?: number;
+      notVoting?: number;
+      present?: number;
+    };
+    members?: VoteMember[];
+    memberVotes?: {
+      Yea?: VoteMember[];
+      Nay?: VoteMember[];
+      Present?: VoteMember[];
+      "Not Voting"?: VoteMember[];
+      yea?: VoteMember[];
+      nay?: VoteMember[];
+      present?: VoteMember[];
+      notVoting?: VoteMember[];
+    };
   };
 }
 
-/** Extract congress/type/number from a Congress.gov bill URL.
- *  e.g. https://api.congress.gov/v3/bill/119/hr/1234?format=json */
-function parseBillUrl(url?: string): { congress: string; type: string; number: string } | null {
-  if (!url) return null;
-  const m = url.match(/\/bill\/(\d+)\/(\w+)\/(\w+)/i);
-  if (!m) return null;
-  return { congress: m[1], type: m[2], number: m[3] };
+interface NormalizedVoteMember {
+  bioguideId?: string;
+  displayName: string;
+  party: string | null;
+  state?: string;
+  rawPosition?: string;
+  normalizedPosition: NormalizedVotePosition;
 }
 
-/** Resolve the API path for a bill, falling back to URL parsing if direct fields are absent. */
-function resolveBillPath(b: BillItem): string | null {
-  const congress = b.congress ? String(b.congress) : null;
-  const type = b.type ?? null;
-  const number = b.number != null ? String(b.number) : null;
-
-  if (congress && type && number) {
-    return `/api/congress/bills/${congress}/${type.toLowerCase()}/${number}`;
-  }
-
-  // Fallback: parse from the URL field that Congress.gov always includes
-  const parsed = parseBillUrl(b.url);
-  if (parsed) {
-    return `/api/congress/bills/${parsed.congress}/${parsed.type.toLowerCase()}/${parsed.number}`;
-  }
-
-  return null;
+interface VoteSnapshot {
+  key: string;
+  label: string;
+  date?: string;
+  detail: NonNullable<VoteDetailResponse["vote"]>;
+  members: NormalizedVoteMember[];
 }
 
-/** Display label for a bill (type + number), falling back to URL parsing. */
-function billLabel(b: BillItem): string {
-  const type = b.type?.toUpperCase();
-  const num = b.number != null ? String(b.number) : null;
-  if (type && num) return `${type} ${num}`;
-  const parsed = parseBillUrl(b.url);
-  if (parsed) return `${parsed.type.toUpperCase()} ${parsed.number}`;
-  return "Bill";
+interface VoteChangeSummary {
+  memberKey: string;
+  displayName: string;
+  party: string | null;
+  state?: string;
+  changes: Array<{
+    voteKey: string;
+    voteLabel: string;
+    position: string;
+  }>;
+}
+
+function resolveBillPath(bill: BillItem): string | null {
+  const resolved = resolveBillReference(bill);
+  if (!resolved) return null;
+  return `/api/congress/bills/${resolved.congress}/${resolved.type}/${resolved.number}`;
+}
+
+function voteRefKey(vote: RecordedVoteRef) {
+  return [vote.congress, vote.chamber?.toLowerCase(), vote.rollNumber, vote.sessionNumber]
+    .filter(Boolean)
+    .join("-");
+}
+
+function getVoteTotals(vote?: VoteDetailResponse["vote"]) {
+  if (!vote) {
+    return { yea: undefined, nay: undefined, present: undefined, notVoting: undefined };
+  }
+
+  return {
+    yea: vote.totalYea ?? vote.totals?.yea,
+    nay: vote.totalNay ?? vote.totals?.nay,
+    present: vote.totalPresent ?? vote.totals?.present,
+    notVoting:
+      vote.totalNotVoting ?? vote.totals?.not_voting ?? vote.totals?.notVoting,
+  };
+}
+
+function getVoteMembers(vote?: VoteDetailResponse["vote"]): NormalizedVoteMember[] {
+  if (!vote) return [];
+
+  if (vote.members?.length) {
+    return vote.members.map((member) => ({
+      bioguideId: member.bioguideId,
+      displayName: formatMemberDisplayName(member),
+      party: normalizePartyValue(member.party) ?? member.party ?? null,
+      state: member.state,
+      rawPosition: member.votePosition ?? member.memberVoted,
+      normalizedPosition: normalizeVotePosition(member.votePosition ?? member.memberVoted),
+    }));
+  }
+
+  if (!vote.memberVotes) return [];
+
+  const groups = [
+    { members: vote.memberVotes.Yea ?? vote.memberVotes.yea ?? [], position: "Yea" },
+    { members: vote.memberVotes.Nay ?? vote.memberVotes.nay ?? [], position: "Nay" },
+    { members: vote.memberVotes.Present ?? vote.memberVotes.present ?? [], position: "Present" },
+    {
+      members: vote.memberVotes["Not Voting"] ?? vote.memberVotes.notVoting ?? [],
+      position: "Not Voting",
+    },
+  ];
+
+  return groups.flatMap(({ members, position }) =>
+    members.map((member) => ({
+      bioguideId: member.bioguideId,
+      displayName: formatMemberDisplayName(member),
+      party: normalizePartyValue(member.party) ?? member.party ?? null,
+      state: member.state,
+      rawPosition: member.votePosition ?? member.memberVoted ?? position,
+      normalizedPosition: normalizeVotePosition(member.votePosition ?? member.memberVoted ?? position),
+    }))
+  );
+}
+
+function getPositionTone(position: NormalizedVotePosition) {
+  if (position === "yea") return "badge-yea";
+  if (position === "nay") return "badge-nay";
+  return "bg-vibe-border text-vibe-dim";
+}
+
+function dedupeRecordedVotes(actions?: BillActionItem[]) {
+  const entries = (actions ?? []).flatMap((action) =>
+    (action.recordedVotes ?? []).map((vote) => ({
+      ...vote,
+      actionDate: action.actionDate,
+      actionText: action.text,
+    }))
+  );
+
+  const unique = new Map<string, typeof entries[number]>();
+  for (const entry of entries) {
+    const key = voteRefKey(entry);
+    if (!key) continue;
+    if (!unique.has(key)) unique.set(key, entry);
+  }
+
+  return Array.from(unique.values()).sort((a, b) =>
+    (a.date ?? a.actionDate ?? "").localeCompare(b.date ?? b.actionDate ?? "")
+  );
+}
+
+function getCrossPartyVoters(members: NormalizedVoteMember[]) {
+  const partyGroups = new Map<string, NormalizedVoteMember[]>();
+
+  for (const member of members) {
+    if (!member.party || member.normalizedPosition === "unknown") continue;
+    const current = partyGroups.get(member.party) ?? [];
+    current.push(member);
+    partyGroups.set(member.party, current);
+  }
+
+  const crossers: NormalizedVoteMember[] = [];
+
+  for (const [, partyMembers] of partyGroups) {
+    if (partyMembers.length < 3) continue;
+
+    const counts = new Map<NormalizedVotePosition, number>();
+    for (const member of partyMembers) {
+      counts.set(member.normalizedPosition, (counts.get(member.normalizedPosition) ?? 0) + 1);
+    }
+
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    if (sorted.length < 2 || sorted[0][1] === sorted[1][1]) continue;
+
+    const majorityPosition = sorted[0][0];
+    crossers.push(
+      ...partyMembers.filter((member) => member.normalizedPosition !== majorityPosition)
+    );
+  }
+
+  return crossers.sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function getVoteChangeSummaries(voteSnapshots: VoteSnapshot[]): VoteChangeSummary[] {
+  const chronologicallySorted = [...voteSnapshots].sort((a, b) =>
+    (a.date ?? "").localeCompare(b.date ?? "")
+  );
+
+  const memberTimelines = new Map<string, VoteChangeSummary>();
+
+  for (const snapshot of chronologicallySorted) {
+    for (const member of snapshot.members) {
+      if (member.normalizedPosition === "unknown") continue;
+
+      const memberKey = member.bioguideId ?? `${member.displayName}-${member.party ?? "?"}-${member.state ?? "?"}`;
+      const existing = memberTimelines.get(memberKey) ?? {
+        memberKey,
+        displayName: member.displayName,
+        party: member.party,
+        state: member.state,
+        changes: [],
+      };
+
+      existing.changes.push({
+        voteKey: snapshot.key,
+        voteLabel: snapshot.label,
+        position: formatVotePositionLabel(member.rawPosition),
+      });
+      memberTimelines.set(memberKey, existing);
+    }
+  }
+
+  return [...memberTimelines.values()]
+    .filter((timeline) => {
+      const positions = new Set(timeline.changes.map((change) => change.position));
+      return timeline.changes.length > 1 && positions.size > 1;
+    })
+    .sort((a, b) => b.changes.length - a.changes.length || a.displayName.localeCompare(b.displayName));
 }
 
 export function BillSearch() {
@@ -137,7 +338,6 @@ export function BillSearch() {
   const detail = useApi<BillDetailResponse>();
   const cosponsors = useApi<CosponsorListResponse>();
   const actions = useApi<BillActionsResponse>();
-  const voteDetail = useApi<VoteDetailResponse>();
 
   const handleSearch = () => {
     setExpandedIndex(null);
@@ -146,43 +346,32 @@ export function BillSearch() {
     list.fetchData(`/api/congress/bills?${params.toString()}`);
   };
 
-  const handleBillClick = (b: BillItem, idx: number) => {
-    if (expandedIndex === idx) {
+  const handleBillClick = (bill: BillItem, index: number) => {
+    if (expandedIndex === index) {
       setExpandedIndex(null);
       return;
     }
-    setExpandedIndex(idx);
 
-    const path = resolveBillPath(b);
-    if (path) {
-      detail.fetchData(path);
-      cosponsors.fetchData(`${path}/cosponsors?limit=50`);
-      actions.fetchData(`${path}/actions?limit=50`);
-    }
-  };
+    setExpandedIndex(index);
+    const path = resolveBillPath(bill);
+    if (!path) return;
 
-  const fetchRecordedVote = (vote: {
-    chamber?: string;
-    congress?: string | number;
-    rollNumber?: string | number;
-  }) => {
-    if (!vote.congress || !vote.chamber || !vote.rollNumber) return;
-    voteDetail.fetchData(
-      `/api/congress/votes/${vote.congress}/${vote.chamber.toLowerCase()}/${vote.rollNumber}`
-    );
+    detail.fetchData(path);
+    cosponsors.fetchData(`${path}/cosponsors?limit=100`);
+    actions.fetchData(`${path}/actions?limit=250`);
   };
 
   return (
     <div className="space-y-4">
       <div className="card">
         <h2 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider mb-3">
-          Browse Legislation
+          Bills and Roll Call Votes
         </h2>
         <div className="flex flex-col sm:flex-row gap-2">
           <select
             className="select"
             value={congress}
-            onChange={(e) => setCongress(e.target.value)}
+            onChange={(event) => setCongress(event.target.value)}
           >
             <option value="119">119th Congress</option>
             <option value="118">118th Congress</option>
@@ -192,18 +381,20 @@ export function BillSearch() {
           <select
             className="select"
             value={billType}
-            onChange={(e) => setBillType(e.target.value)}
+            onChange={(event) => setBillType(event.target.value)}
           >
             <option value="">All Types</option>
             <option value="hr">H.R. (House Bill)</option>
             <option value="s">S. (Senate Bill)</option>
-            <option value="hjres">H.J.Res (House Joint Resolution)</option>
-            <option value="sjres">S.J.Res (Senate Joint Resolution)</option>
+            <option value="hjres">H.J.Res. (House Joint Resolution)</option>
+            <option value="sjres">S.J.Res. (Senate Joint Resolution)</option>
+            <option value="hres">H.Res. (House Resolution)</option>
+            <option value="sres">S.Res. (Senate Resolution)</option>
           </select>
           <select
             className="select"
             value={limit}
-            onChange={(e) => setLimit(e.target.value)}
+            onChange={(event) => setLimit(event.target.value)}
           >
             <option value="10">10 results</option>
             <option value="20">20 results</option>
@@ -214,7 +405,8 @@ export function BillSearch() {
           </button>
         </div>
         <p className="text-xs text-vibe-dim mt-2">
-          Click a bill to expand full details inline.
+          Expand a bill to see its public context links, every recorded roll call we can find,
+          individual member votes, and cross-party or vote-change callouts.
         </p>
       </div>
 
@@ -228,41 +420,38 @@ export function BillSearch() {
 
       {list.data?.bills && (
         <div className="space-y-2">
-          {list.data.bills.map((b, i) => {
-            const isExpanded = expandedIndex === i;
+          {list.data.bills.map((bill, index) => {
+            const isExpanded = expandedIndex === index;
+            const resolved = resolveBillReference(bill) ?? parseBillUrl(bill.url);
+
             return (
-              <div key={i}>
-                {/* Bill row */}
+              <div key={`${bill.url ?? formatBillLabel(bill)}-${index}`}>
                 <button
-                  onClick={() => handleBillClick(b, i)}
+                  onClick={() => handleBillClick(bill, index)}
                   className={`card w-full text-left hover:border-vibe-accent/50 transition-colors ${
                     isExpanded ? "border-vibe-accent/50" : ""
                   }`}
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
                         <span className="text-xs font-bold text-vibe-accent">
-                          {billLabel(b)}
+                          {formatBillLabel(bill)}
                         </span>
-                        {b.originChamber && (
-                          <span className="text-xs text-vibe-dim">
-                            {b.originChamber}
-                          </span>
+                        {bill.originChamber && (
+                          <span className="text-xs text-vibe-dim">{bill.originChamber}</span>
                         )}
-                        {(b.congress ?? parseBillUrl(b.url)?.congress) && (
+                        {resolved?.congress && (
                           <span className="text-xs text-vibe-dim">
-                            {b.congress ?? parseBillUrl(b.url)?.congress}th Congress
+                            {resolved.congress}th Congress
                           </span>
                         )}
                       </div>
-                      <p className="text-sm">{b.title}</p>
-                      {b.latestAction && (
+                      <p className="text-sm">{bill.title}</p>
+                      {bill.latestAction && (
                         <p className="text-xs text-vibe-dim mt-1">
-                          <span className="font-medium">
-                            {b.latestAction.actionDate}:
-                          </span>{" "}
-                          {b.latestAction.text}
+                          <span className="font-medium">{bill.latestAction.actionDate}:</span>{" "}
+                          {bill.latestAction.text}
                         </p>
                       )}
                     </div>
@@ -272,10 +461,9 @@ export function BillSearch() {
                   </div>
                 </button>
 
-                {/* Inline detail */}
                 {isExpanded && (
                   <div className="mt-1 ml-2">
-                    {(detail.loading || cosponsors.loading) && <LoadingRows />}
+                    {(detail.loading || cosponsors.loading || actions.loading) && <LoadingRows />}
 
                     {!detail.loading && detail.error && (
                       <div className="card border-vibe-nay/30">
@@ -286,23 +474,13 @@ export function BillSearch() {
                     {!detail.loading && detail.data?.bill && (
                       <BillDetailCard
                         bill={detail.data.bill}
+                        actions={actions.data?.actions}
                         cosponsorList={cosponsors.data?.cosponsors}
                         cosponsorCount={cosponsors.data?.pagination?.count}
                         rawDetail={detail.data}
+                        rawActions={actions.data}
                         rawCosponsors={cosponsors.data}
-                        actions={actions.data?.actions}
-                        onLoadVote={fetchRecordedVote}
-                        voteDetail={voteDetail.data?.vote}
                       />
-                    )}
-
-                    {!detail.loading && !detail.error && !detail.data?.bill && (
-                      <div className="card">
-                        <p className="text-xs text-vibe-dim italic">
-                          No detail data returned. Check the JSON viewer below.
-                        </p>
-                        <JsonViewer data={detail.data} label="Raw API Response" />
-                      </div>
                     )}
                   </div>
                 )}
@@ -317,86 +495,140 @@ export function BillSearch() {
 
 function BillDetailCard({
   bill,
+  actions,
   cosponsorList,
   cosponsorCount,
   rawDetail,
+  rawActions,
   rawCosponsors,
-  actions,
-  onLoadVote,
-  voteDetail,
 }: {
   bill: NonNullable<BillDetailResponse["bill"]>;
+  actions?: BillActionItem[];
   cosponsorList?: Cosponsor[];
   cosponsorCount?: number;
   rawDetail: BillDetailResponse;
+  rawActions: BillActionsResponse | null;
   rawCosponsors: CosponsorListResponse | null;
-  actions?: BillActionsResponse["actions"];
-  onLoadVote: (vote: {
-    chamber?: string;
-    congress?: string | number;
-    rollNumber?: string | number;
-  }) => void;
-  voteDetail?: VoteDetailResponse["vote"];
 }) {
   const [showCosponsors, setShowCosponsors] = useState(false);
+  const [voteSnapshots, setVoteSnapshots] = useState<Record<string, VoteSnapshot>>({});
+
+  const billKey = `${bill.congress ?? "?"}-${bill.type ?? "?"}-${bill.number ?? "?"}`;
+
+  useEffect(() => {
+    setVoteSnapshots({});
+  }, [billKey]);
 
   const subjects = bill.subjects?.legislativeSubjects ?? [];
   const policyArea = bill.policyArea?.name ?? bill.subjects?.policyArea?.name;
   const sponsors = bill.sponsors ?? [];
-  const cosponsorFinal = cosponsorList ?? bill.cosponsorList ?? [];
-  const totalCosponsors = cosponsorCount ?? bill.cosponsors?.count ?? cosponsorFinal.length;
-  const recordedVotes = (actions ?? []).flatMap((a) => a.recordedVotes ?? []);
+  const finalCosponsors = cosponsorList ?? bill.cosponsorList ?? [];
+  const totalCosponsors = cosponsorCount ?? bill.cosponsors?.count ?? finalCosponsors.length;
+  const billLinks = buildBillLinks(bill);
+  const recordedVotes = useMemo(() => dedupeRecordedVotes(actions), [actions]);
+  const changeSummaries = useMemo(
+    () => getVoteChangeSummaries(Object.values(voteSnapshots)),
+    [voteSnapshots]
+  );
+
+  const handleVoteLoaded = (snapshot: VoteSnapshot) => {
+    setVoteSnapshots((current) => {
+      if (current[snapshot.key]) return current;
+      return { ...current, [snapshot.key]: snapshot };
+    });
+  };
 
   return (
-    <div className="card border-vibe-accent/30">
-      {/* Header */}
-      <div className="mb-3">
-        <div className="flex items-center gap-2 mb-1">
+    <div className="card border-vibe-accent/30 space-y-5">
+      <div>
+        <div className="flex flex-wrap items-center gap-2 mb-1">
           <h3 className="text-sm font-bold text-vibe-accent">
             {bill.type?.toUpperCase()} {bill.number}
           </h3>
           {bill.congress && (
             <span className="text-xs text-vibe-dim">{bill.congress}th Congress</span>
           )}
-          {bill.laws && bill.laws.length > 0 && (
-            <span className="badge badge-yea text-xs">Became Law</span>
+          {bill.originChamber && (
+            <span className="badge bg-vibe-surface text-vibe-text">{bill.originChamber}</span>
           )}
+          {bill.laws?.length ? <span className="badge badge-yea">Became Law</span> : null}
         </div>
         <p className="text-sm font-medium">{bill.title}</p>
-        {bill.introducedDate && (
-          <p className="text-xs text-vibe-dim mt-1">Introduced: {bill.introducedDate}</p>
-        )}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-vibe-dim">
+          {bill.introducedDate && <span>Introduced: {bill.introducedDate}</span>}
+          {bill.updateDate && <span>Updated: {bill.updateDate}</span>}
+          {bill.actions?.count != null && <span>{bill.actions.count} total actions</span>}
+          {recordedVotes.length > 0 && <span>{recordedVotes.length} recorded vote(s)</span>}
+        </div>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+      {billLinks && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <a
+            href={billLinks.detail}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="card p-3 hover:border-vibe-accent/50 transition-colors"
+          >
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Context</p>
+            <p className="text-sm font-medium mt-1">Congress.gov overview</p>
+          </a>
+          <a
+            href={billLinks.text}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="card p-3 hover:border-vibe-accent/50 transition-colors"
+          >
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Full Text</p>
+            <p className="text-sm font-medium mt-1">Read bill text and versions</p>
+          </a>
+          <a
+            href={billLinks.actions}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="card p-3 hover:border-vibe-accent/50 transition-colors"
+          >
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">History</p>
+            <p className="text-sm font-medium mt-1">Full action timeline</p>
+          </a>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {policyArea && (
           <div className="bg-vibe-surface rounded px-2 py-1.5 col-span-2">
-            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">
-              Policy Area
-            </p>
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Policy Area</p>
             <p className="text-xs font-medium text-vibe-cosmic">{policyArea}</p>
-          </div>
-        )}
-        {bill.actions?.count != null && (
-          <div className="bg-vibe-surface rounded px-2 py-1.5">
-            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Actions</p>
-            <p className="text-sm font-bold">{bill.actions.count}</p>
           </div>
         )}
         {bill.committees?.count != null && (
           <div className="bg-vibe-surface rounded px-2 py-1.5">
-            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">
-              Committees
-            </p>
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Committees</p>
             <p className="text-sm font-bold">{bill.committees.count}</p>
+          </div>
+        )}
+        {totalCosponsors != null && (
+          <div className="bg-vibe-surface rounded px-2 py-1.5">
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Cosponsors</p>
+            <p className="text-sm font-bold">{totalCosponsors}</p>
+          </div>
+        )}
+        {bill.textVersions?.count != null && (
+          <div className="bg-vibe-surface rounded px-2 py-1.5">
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Text Versions</p>
+            <p className="text-sm font-bold">{bill.textVersions.count}</p>
+          </div>
+        )}
+        {bill.summaries?.count != null && (
+          <div className="bg-vibe-surface rounded px-2 py-1.5">
+            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Summaries</p>
+            <p className="text-sm font-bold">{bill.summaries.count}</p>
           </div>
         )}
       </div>
 
-      {/* Latest action */}
       {bill.latestAction && (
-        <div className="mb-4 px-3 py-2 bg-vibe-surface rounded border-l-2 border-vibe-accent">
+        <div className="px-3 py-2 bg-vibe-surface rounded border-l-2 border-vibe-accent">
           <p className="text-[10px] text-vibe-dim uppercase tracking-wide mb-0.5">
             Latest Action
           </p>
@@ -405,18 +637,17 @@ function BillDetailCard({
         </div>
       )}
 
-      {/* Sponsors */}
       {sponsors.length > 0 && (
-        <div className="mb-4">
+        <div>
           <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
             Primary Sponsor{sponsors.length > 1 ? "s" : ""}
           </p>
           <div className="flex flex-wrap gap-1">
-            {sponsors.map((s, i) => (
-              <span key={i} className="badge bg-vibe-surface text-vibe-text">
-                {s.fullName}
-                {s.party || s.state
-                  ? ` (${[s.party, s.state].filter(Boolean).join("-")})`
+            {sponsors.map((sponsor, index) => (
+              <span key={`${sponsor.bioguideId ?? sponsor.fullName ?? index}`} className="badge bg-vibe-surface text-vibe-text">
+                {sponsor.fullName}
+                {sponsor.party || sponsor.state
+                  ? ` (${[sponsor.party, sponsor.state].filter(Boolean).join("-")})`
                   : ""}
               </span>
             ))}
@@ -424,48 +655,44 @@ function BillDetailCard({
         </div>
       )}
 
-      {/* Cosponsors (collapsible) */}
-      <div className="mb-4">
+      <div>
         <button
           className="flex items-center gap-2 text-xs text-vibe-dim uppercase tracking-wider mb-2 hover:text-vibe-text"
-          onClick={() => setShowCosponsors((v) => !v)}
+          onClick={() => setShowCosponsors((value) => !value)}
         >
           Cosponsors ({totalCosponsors ?? "?"})
           <span>{showCosponsors ? "▲" : "▼"}</span>
         </button>
-        {showCosponsors && cosponsorFinal.length > 0 && (
+        {showCosponsors && finalCosponsors.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-60 overflow-y-auto">
-            {cosponsorFinal.map((c, i) => (
+            {finalCosponsors.map((cosponsor, index) => (
               <div
-                key={i}
+                key={`${cosponsor.bioguideId ?? cosponsor.fullName ?? index}`}
                 className="flex items-center justify-between px-2 py-1 bg-vibe-surface rounded text-xs"
               >
-                <span className="font-medium truncate">{c.fullName}</span>
+                <span className="font-medium truncate">{cosponsor.fullName}</span>
                 <span className="text-vibe-dim shrink-0 ml-2">
-                  {c.party}-{c.state}
-                  {c.isOriginalCosponsor ? " ★" : ""}
+                  {[cosponsor.party, cosponsor.state].filter(Boolean).join("-")}
+                  {cosponsor.isOriginalCosponsor ? " ★" : ""}
                 </span>
               </div>
             ))}
           </div>
         )}
-        {showCosponsors && cosponsorFinal.length === 0 && (
-          <p className="text-xs text-vibe-dim italic">
-            No cosponsor data available.
-          </p>
+        {showCosponsors && finalCosponsors.length === 0 && (
+          <p className="text-xs text-vibe-dim italic">No cosponsor data available.</p>
         )}
       </div>
 
-      {/* Legislative subjects */}
       {subjects.length > 0 && (
-        <div className="mb-4">
+        <div>
           <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
             Legislative Subjects
           </p>
           <div className="flex flex-wrap gap-1">
-            {subjects.slice(0, 20).map((s, i) => (
-              <span key={i} className="badge bg-vibe-border text-vibe-dim text-xs">
-                {s.name}
+            {subjects.slice(0, 20).map((subject, index) => (
+              <span key={`${subject.name ?? "subject"}-${index}`} className="badge bg-vibe-border text-vibe-dim text-xs">
+                {subject.name}
               </span>
             ))}
             {subjects.length > 20 && (
@@ -477,54 +704,266 @@ function BillDetailCard({
         </div>
       )}
 
-      {/* CBO estimates */}
-      {bill.cboCostEstimates && bill.cboCostEstimates.length > 0 && (
-        <div className="mb-4 text-xs text-vibe-dim">
-          <p className="uppercase tracking-wider mb-1">CBO Cost Estimate</p>
-          {bill.cboCostEstimates.map((e, i) => (
-            <p key={i}>{e.description}</p>
-          ))}
-        </div>
-      )}
-
-      {recordedVotes.length > 0 && (
-        <div className="mb-4">
-          <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">Related Roll Call Votes</p>
-          <div className="space-y-1">
-            {recordedVotes.slice(0, 10).map((v, i) => (
-              <button
-                key={i}
-                className="w-full text-left px-2 py-1 rounded bg-vibe-surface text-xs hover:border hover:border-vibe-accent/40"
-                onClick={() => onLoadVote(v)}
-              >
-                {v.chamber} Roll #{v.rollNumber} ({v.date ?? `Session ${v.sessionNumber ?? "?"}`})
-              </button>
-            ))}
-          </div>
-          {voteDetail && (
-            <div className="mt-2 p-2 rounded bg-vibe-surface text-xs">
-              <p>
-                Yea {voteDetail.totalYea ?? "—"} · Nay {voteDetail.totalNay ?? "—"} · Not Voting {voteDetail.totalNotVoting ?? "—"}
-              </p>
-              {voteDetail.members && voteDetail.members.length > 0 && (
-                <div className="mt-1 max-h-40 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1">
-                  {voteDetail.members.map((m, mi) => (
-                    <div key={mi} className="flex justify-between">
-                      <span className="truncate">{m.fullName}</span>
-                      <span className="text-vibe-dim ml-2">{m.party}-{m.state} {m.votePosition}</span>
-                    </div>
-                  ))}
-                </div>
+      {bill.cboCostEstimates?.length ? (
+        <div className="text-xs text-vibe-dim space-y-1">
+          <p className="uppercase tracking-wider">CBO Cost Estimate</p>
+          {bill.cboCostEstimates.map((estimate, index) => (
+            <div key={`${estimate.description ?? "estimate"}-${index}`}>
+              <p>{estimate.description}</p>
+              {estimate.url && (
+                <a
+                  href={estimate.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-vibe-accent hover:underline"
+                >
+                  Source document
+                </a>
               )}
             </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="space-y-3">
+        <div>
+          <h4 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider">
+            Recorded Roll Calls
+          </h4>
+          <p className="text-xs text-vibe-dim mt-1">
+            Every action below is a roll call tied to this bill, with who voted Yea, Nay,
+            Present, or did not show up.
+          </p>
+        </div>
+
+        {changeSummaries.length > 0 && (
+          <div className="card border-vibe-cosmic/30 bg-vibe-cosmic/5 p-3">
+            <p className="text-xs text-vibe-cosmic uppercase tracking-wider mb-2">
+              Vote Changers On This Bill
+            </p>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {changeSummaries.map((summary) => (
+                <div
+                  key={summary.memberKey}
+                  className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1 text-xs"
+                >
+                  <div>
+                    <p className="font-medium text-vibe-text">
+                      {summary.displayName}
+                      {summary.party || summary.state
+                        ? ` (${[summary.party, summary.state].filter(Boolean).join("-")})`
+                        : ""}
+                    </p>
+                    <p className="text-vibe-dim">
+                      {summary.changes.map((change) => change.position).join(" -> ")}
+                    </p>
+                  </div>
+                  <p className="text-vibe-dim shrink-0">
+                    {summary.changes.map((change) => change.voteLabel).join(" • ")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {recordedVotes.length === 0 && (
+          <div className="card border-vibe-border/70 p-3">
+            <p className="text-sm text-vibe-dim">
+              No recorded roll call votes were listed for this bill in the current Congress.gov action history.
+            </p>
+          </div>
+        )}
+
+        {recordedVotes.map((vote) => (
+          <RecordedVoteCard
+            key={voteRefKey(vote)}
+            vote={vote}
+            onLoaded={handleVoteLoaded}
+          />
+        ))}
+      </div>
+
+      <JsonViewer
+        data={{ detail: rawDetail, actions: rawActions, cosponsors: rawCosponsors }}
+        label="Bill API payloads"
+      />
+    </div>
+  );
+}
+
+function RecordedVoteCard({
+  vote,
+  onLoaded,
+}: {
+  vote: RecordedVoteRef & { actionDate?: string; actionText?: string };
+  onLoaded: (snapshot: VoteSnapshot) => void;
+}) {
+  const detail = useApi<VoteDetailResponse>();
+  const key = voteRefKey(vote);
+
+  useEffect(() => {
+    if (!vote.congress || !vote.chamber || !vote.rollNumber) return;
+    detail.fetchData(
+      `/api/congress/votes/${vote.congress}/${vote.chamber.toLowerCase()}/${vote.rollNumber}`
+    );
+  }, [vote.chamber, vote.congress, vote.rollNumber]);
+
+  const members = useMemo(() => getVoteMembers(detail.data?.vote), [detail.data]);
+  const totals = getVoteTotals(detail.data?.vote);
+  const crossPartyVoters = useMemo(() => getCrossPartyVoters(members), [members]);
+
+  useEffect(() => {
+    if (!detail.data?.vote) return;
+    onLoaded({
+      key,
+      label: `${vote.chamber} #${vote.rollNumber}`,
+      date: detail.data.vote.date ?? vote.date ?? vote.actionDate,
+      detail: detail.data.vote,
+      members,
+    });
+  }, [detail.data, key, members, onLoaded, vote.actionDate, vote.chamber, vote.date, vote.rollNumber]);
+
+  return (
+    <div className="card border-vibe-border/80 p-3 space-y-3">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+        <div>
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="badge bg-vibe-surface text-vibe-text">
+              {vote.chamber} Roll #{vote.rollNumber}
+            </span>
+            {(detail.data?.vote?.result || vote.actionText) && (
+              <span
+                className={`badge ${
+                  (detail.data?.vote?.result ?? "").toLowerCase().includes("pass") ||
+                  (detail.data?.vote?.result ?? "").toLowerCase().includes("agree")
+                    ? "badge-yea"
+                    : "badge-nay"
+                }`}
+              >
+                {detail.data?.vote?.result ?? "Recorded vote"}
+              </span>
+            )}
+          </div>
+          <p className="text-sm font-medium">
+            {detail.data?.vote?.question ?? detail.data?.vote?.description ?? vote.actionText ?? "Roll call vote"}
+          </p>
+          <p className="text-xs text-vibe-dim mt-1">
+            {detail.data?.vote?.date ?? vote.date ?? vote.actionDate ?? "Date unavailable"}
+            {vote.sessionNumber ? ` · Session ${vote.sessionNumber}` : ""}
+          </p>
+          {detail.data?.vote?.description && detail.data.vote.question && (
+            <p className="text-xs text-vibe-dim mt-1">{detail.data.vote.description}</p>
           )}
+        </div>
+        <div className="text-xs text-vibe-dim">
+          {detail.loading ? "Loading vote detail..." : `${members.length} recorded member votes`}
+        </div>
+      </div>
+
+      {detail.error && (
+        <div className="card border-vibe-nay/30 p-3">
+          <p className="text-sm text-vibe-nay">{detail.error}</p>
         </div>
       )}
 
-      <JsonViewer
-        data={{ bill: rawDetail.bill, cosponsors: rawCosponsors }}
-        label="Full API Response"
-      />
+      {!detail.error && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <VoteCount label="Yea" count={totals.yea} colorClass="text-vibe-yea" />
+            <VoteCount label="Nay" count={totals.nay} colorClass="text-vibe-nay" />
+            <VoteCount label="Present" count={totals.present} colorClass="text-vibe-cosmic" />
+            <VoteCount
+              label="Not Present"
+              count={totals.notVoting}
+              colorClass="text-vibe-dim"
+            />
+          </div>
+
+          {crossPartyVoters.length > 0 && (
+            <div className="rounded border border-vibe-money/30 bg-vibe-money/5 px-3 py-2">
+              <p className="text-[10px] text-vibe-money uppercase tracking-wide mb-1">
+                Across Party Lines
+              </p>
+              <p className="text-xs text-vibe-dim">
+                {crossPartyVoters
+                  .map(
+                    (member) =>
+                      `${member.displayName} (${[member.party, member.state]
+                        .filter(Boolean)
+                        .join("-")}, ${formatVotePositionLabel(member.rawPosition)})`
+                  )
+                  .join("; ")}
+              </p>
+            </div>
+          )}
+
+          {members.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-xs text-vibe-dim uppercase tracking-wide">Who Voted</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-80 overflow-y-auto">
+                {members
+                  .slice()
+                  .sort((a, b) => a.displayName.localeCompare(b.displayName))
+                  .map((member) => (
+                    <div
+                      key={member.bioguideId ?? `${member.displayName}-${member.state ?? "?"}`}
+                      className="flex items-center justify-between px-2 py-1 rounded bg-vibe-surface text-xs gap-2"
+                    >
+                      <div className="min-w-0 flex items-center gap-2">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            member.normalizedPosition === "yea"
+                              ? "bg-vibe-yea"
+                              : member.normalizedPosition === "nay"
+                              ? "bg-vibe-nay"
+                              : member.normalizedPosition === "present"
+                              ? "bg-vibe-cosmic"
+                              : "bg-vibe-dim"
+                          }`}
+                        />
+                        <span className="font-medium truncate">{member.displayName}</span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {(member.party || member.state) && (
+                          <span className="text-vibe-dim">
+                            {[member.party, member.state].filter(Boolean).join("-")}
+                          </span>
+                        )}
+                        <span className={`badge ${getPositionTone(member.normalizedPosition)}`}>
+                          {formatVotePositionLabel(member.rawPosition)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          ) : (
+            !detail.loading && (
+              <p className="text-xs text-vibe-dim italic">
+                Individual member votes were not returned for this roll call.
+              </p>
+            )
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function VoteCount({
+  label,
+  count,
+  colorClass,
+}: {
+  label: string;
+  count?: number;
+  colorClass: string;
+}) {
+  return (
+    <div className="bg-vibe-surface rounded px-2 py-2 text-center">
+      <p className={`text-xl font-bold ${colorClass}`}>{count != null ? count : "-"}</p>
+      <p className="text-[10px] text-vibe-dim uppercase tracking-wide">{label}</p>
     </div>
   );
 }
@@ -532,8 +971,8 @@ function BillDetailCard({
 function LoadingRows() {
   return (
     <div className="space-y-2">
-      {[...Array(3)].map((_, i) => (
-        <div key={i} className="card">
+      {[...Array(3)].map((_, index) => (
+        <div key={index} className="card">
           <div className="shimmer h-4 w-64 mb-2" />
           <div className="shimmer h-3 w-40" />
         </div>

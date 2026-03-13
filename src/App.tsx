@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { HealthCheck } from "./components/HealthCheck";
 import { MemberSearch } from "./components/MemberSearch";
-import { VoteSearch } from "./components/VoteSearch";
 import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
 import { FollowTheMoney } from "./components/FollowTheMoney";
@@ -9,8 +8,7 @@ import { ContextLookup } from "./components/ContextLookup";
 
 const TABS = [
   { id: "members", label: "Members" },
-  { id: "votes", label: "Votes" },
-  { id: "bills", label: "Bills" },
+  { id: "bills", label: "Bills & Votes" },
   { id: "money", label: "Money" },
   { id: "follow", label: "Follow the Money" },
   { id: "context", label: "Cosmic Context" },
@@ -65,7 +63,6 @@ export default function App() {
       {/* Content */}
       <main className="max-w-6xl mx-auto px-4 py-6">
         {activeTab === "members" && <MemberSearch />}
-        {activeTab === "votes" && <VoteSearch />}
         {activeTab === "bills" && <BillSearch />}
         {activeTab === "money" && <FecSearch />}
         {activeTab === "follow" && <FollowTheMoney />}
