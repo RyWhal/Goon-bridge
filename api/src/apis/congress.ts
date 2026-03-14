@@ -6,6 +6,7 @@ import { getSupabase } from "../lib/supabase";
 const congress = new Hono<Env>();
 
 const BASE = "https://api.congress.gov/v3";
+const CONGRESS_API_TIMEOUT_MS = 10_000;
 
 async function congressFetch(
   path: string,
@@ -20,7 +21,14 @@ async function congressFetch(
       url.searchParams.set(k, v);
     }
   }
-  return fetch(url.toString());
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("Congress API request timed out"), CONGRESS_API_TIMEOUT_MS);
+  try {
+    return await fetch(url.toString(), { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -780,7 +788,7 @@ async function fetchCongressMembersPage(
   limit: number,
   offset: number
 ): Promise<CongressMembersResponse> {
-  const resp = await congressFetch(`/member/congress/${congressNum}`, apiKey, {
+  const resp = await congressFetchWithRetry(`/member/congress/${congressNum}`, apiKey, {
     limit: limit.toString(),
     offset: offset.toString(),
   });
@@ -1239,7 +1247,7 @@ async function fetchCongressBillsPage(
   let path = `/bill/${congressNum}`;
   if (billType) path += `/${billType}`;
 
-  const resp = await congressFetch(path, apiKey, params);
+  const resp = await congressFetchWithRetry(path, apiKey, params);
   if (!resp.ok) {
     throw new Error(`Congress API: ${resp.status}`);
   }
