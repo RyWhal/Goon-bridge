@@ -1469,26 +1469,23 @@ congress.get("/members/browse", async (c) => {
         )
         .map((row) => row.bioguide_id);
       if (apiKey && missingSummaryIds.length > 0) {
-        const detailResults = await mapInBatches(missingSummaryIds, 8, async (bioguideId) => ({
-          bioguideId,
-          detail: await fetchMemberDetailSummary(apiKey, bioguideId),
-        }));
-
-        for (const result of detailResults) {
-          detailSummaries.set(result.bioguideId, result.detail);
-        }
-
-        const summaryRows = detailResults
-          .filter((result) => result.detail)
-          .map((result) => ({
-            bioguide_id: result.bioguideId,
-            ...buildMemberSummaryColumns(result.detail),
+        // Keep /members/browse responsive: hydrate missing term summaries asynchronously.
+        c.executionCtx.waitUntil((async () => {
+          const detailResults = await mapInBatches(missingSummaryIds, 8, async (bioguideId) => ({
+            bioguideId,
+            detail: await fetchMemberDetailSummary(apiKey, bioguideId),
           }));
-        if (summaryRows.length > 0) {
-          c.executionCtx.waitUntil(
-            Promise.resolve(sb.from("members").upsert(summaryRows, { onConflict: "bioguide_id" }))
-          );
-        }
+
+          const summaryRows = detailResults
+            .filter((result) => result.detail)
+            .map((result) => ({
+              bioguide_id: result.bioguideId,
+              ...buildMemberSummaryColumns(result.detail),
+            }));
+          if (summaryRows.length > 0) {
+            await sb.from("members").upsert(summaryRows, { onConflict: "bioguide_id" });
+          }
+        })());
       }
 
       const members = rows.map((row) => {
@@ -2315,7 +2312,9 @@ congress.get("/bills", async (c) => {
   const sponsor = c.req.query("sponsor")?.trim() ?? "";
   const committee = c.req.query("committee")?.trim() ?? "";
 
-  const requiresLocalActivitySort = sort.startsWith("updateDate");
+  // Congress.gov already supports updateDate sorting, so we can avoid expensive full scans
+  // unless caller supplied additional filters that require local matching.
+  const requiresLocalActivitySort = false;
   const hasSummaryFilters = Boolean(status || search || startDate || endDate);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
   const requiresScan = hasSummaryFilters || hasMetadataFilters || requiresLocalActivitySort;
