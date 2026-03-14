@@ -194,6 +194,8 @@ interface VoteChangeSummary {
   }>;
 }
 
+const BILL_LIST_QUERY_VERSION = "20260314";
+
 function resolveBillPath(bill: BillItem): string | null {
   const resolved = resolveBillReference(bill);
   if (!resolved) return null;
@@ -408,8 +410,6 @@ export function BillSearch() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [sponsorParty, setSponsorParty] = useState("");
-  const [sponsorFilter, setSponsorFilter] = useState("");
-  const [committeeFilter, setCommitteeFilter] = useState("");
   const [offset, setOffset] = useState(0);
   const [expandedBillKey, setExpandedBillKey] = useState<string | null>(null);
   const [submittedFilters, setSubmittedFilters] = useState({
@@ -422,8 +422,6 @@ export function BillSearch() {
     startDate: "",
     endDate: "",
     sponsorParty: "",
-    sponsorFilter: "",
-    committeeFilter: "",
   });
   const [searchNonce, setSearchNonce] = useState(1);
   const list = useApi<BillListResponse>();
@@ -438,6 +436,7 @@ export function BillSearch() {
       limit: submittedFilters.limit,
       offset: String(offset),
       sort: submittedFilters.sortBy,
+      v: BILL_LIST_QUERY_VERSION,
     });
     if (submittedFilters.billType) params.set("type", submittedFilters.billType);
     if (submittedFilters.statusFilter) params.set("status", submittedFilters.statusFilter);
@@ -447,8 +446,6 @@ export function BillSearch() {
     if (submittedFilters.startDate) params.set("startDate", submittedFilters.startDate);
     if (submittedFilters.endDate) params.set("endDate", submittedFilters.endDate);
     if (submittedFilters.sponsorParty) params.set("sponsorParty", submittedFilters.sponsorParty);
-    if (submittedFilters.sponsorFilter) params.set("sponsor", submittedFilters.sponsorFilter);
-    if (submittedFilters.committeeFilter) params.set("committee", submittedFilters.committeeFilter);
     list.fetchData(`/api/congress/bills?${params.toString()}`);
   }, [list.fetchData, offset, searchNonce, submittedFilters]);
 
@@ -464,8 +461,6 @@ export function BillSearch() {
       startDate,
       endDate,
       sponsorParty,
-      sponsorFilter: sponsorFilter.trim(),
-      committeeFilter: committeeFilter.trim(),
     });
     setSearchNonce((current) => current + 1);
   };
@@ -526,12 +521,14 @@ export function BillSearch() {
           </select>
           <select
             className="select"
-            value={limit}
-            onChange={(event) => setLimit(event.target.value)}
+            value={sponsorParty}
+            onChange={(event) => setSponsorParty(event.target.value)}
           >
-            <option value="10">10 results</option>
-            <option value="20">20 results</option>
-            <option value="50">50 results</option>
+            {SPONSOR_PARTY_OPTIONS.map((option) => (
+              <option key={option.value || "all"} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
           <select
             className="select"
@@ -586,34 +583,20 @@ export function BillSearch() {
           </div>
           <select
             className="select"
-            value={sponsorParty}
-            onChange={(event) => setSponsorParty(event.target.value)}
+            value={limit}
+            onChange={(event) => setLimit(event.target.value)}
           >
-            {SPONSOR_PARTY_OPTIONS.map((option) => (
-              <option key={option.value || "all"} value={option.value}>
-                {option.label}
-              </option>
-            ))}
+            <option value="10">10 results</option>
+            <option value="20">20 results</option>
+            <option value="50">50 results</option>
           </select>
-          <input
-            className="input"
-            value={sponsorFilter}
-            onChange={(event) => setSponsorFilter(event.target.value)}
-            placeholder="Sponsor name"
-          />
-          <input
-            className="input lg:col-span-2"
-            value={committeeFilter}
-            onChange={(event) => setCommitteeFilter(event.target.value)}
-            placeholder="Committee name"
-          />
-          <button onClick={handleSearch} className="btn btn-primary lg:col-span-2">
+          <button onClick={handleSearch} className="btn btn-primary lg:col-span-3">
             Fetch Bills
           </button>
         </div>
         <p className="text-xs text-vibe-dim mt-2">
           Browse the full Congress.gov bill stream with page controls, workflow status filters,
-          sponsor metadata, committee matching, full-text bill search, and date filtering.
+          sponsor party filtering, full-text bill search, and date filtering.
         </p>
       </div>
 

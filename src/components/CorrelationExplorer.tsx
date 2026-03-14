@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
+import { resolveMemberImageUrl } from "../lib/congress";
 
 interface CorrelationMemberResponse {
   member?: {
@@ -283,6 +284,7 @@ export function CorrelationExplorer() {
   };
 
   const selectedMember = member.data?.member;
+  const selectedMemberImageUrl = resolveMemberImageUrl(selectedMember?.image_url);
   const foundMembers = useMemo(() => {
     const byMember = new Map<string, { bioguideId: string; memberName: string; count: number; latestDate: string | null }>();
     for (const entry of recentCases.data?.cases ?? []) {
@@ -447,9 +449,9 @@ export function CorrelationExplorer() {
               <div className="card">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div className="flex items-center gap-3">
-                    {selectedMember?.image_url && (
+                    {selectedMemberImageUrl && (
                       <img
-                        src={selectedMember.image_url}
+                        src={selectedMemberImageUrl}
                         alt=""
                         className="h-14 w-14 rounded-lg bg-vibe-border object-cover"
                       />

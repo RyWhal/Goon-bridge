@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
-import { buildBillLinks, formatBillLabel, formatVotePositionLabel, normalizeVotePosition } from "../lib/congress";
+import {
+  buildBillLinks,
+  formatBillLabel,
+  formatVotePositionLabel,
+  normalizeVotePosition,
+  resolveMemberImageUrl,
+} from "../lib/congress";
 
 interface MemberResult {
   name?: string;
@@ -334,6 +340,7 @@ function MemberCard({
   const chamber =
     normalizeChamber(member.chamber) ??
     (member.district == null ? "Senate" : "House");
+  const portraitUrl = resolveMemberImageUrl(member.depiction?.imageUrl);
   const tenureLabel =
     member.congressesServed != null
       ? `${member.congressesServed} congress${member.congressesServed === 1 ? "" : "es"} served`
@@ -348,9 +355,9 @@ function MemberCard({
         }`}
       >
         <div className="flex items-center gap-2.5">
-          {member.depiction?.imageUrl && (
+          {portraitUrl && (
             <img
-              src={member.depiction.imageUrl}
+              src={portraitUrl}
               alt=""
               className="h-9 w-9 rounded-full object-cover bg-vibe-border"
             />
@@ -432,14 +439,15 @@ function MemberDetailCard({
     },
     { yea: 0, nay: 0, present: 0, notVoting: 0 }
   );
+  const portraitUrl = resolveMemberImageUrl(member.depiction?.imageUrl);
 
   return (
     <div className="card border-vibe-accent/30 mt-2">
       {/* Header */}
       <div className="flex items-start gap-4 mb-4">
-        {member.depiction?.imageUrl && (
+        {portraitUrl && (
           <img
-            src={member.depiction.imageUrl}
+            src={portraitUrl}
             alt=""
             className="w-20 h-20 rounded-lg object-cover bg-vibe-border shrink-0"
           />

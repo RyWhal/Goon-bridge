@@ -307,6 +307,23 @@ function normalizePartyValue(raw?: string | null): string | null {
   return cleaned;
 }
 
+function normalizeMemberImageUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("//")) return `https:${trimmed}`;
+
+  const normalizedPath = trimmed.replace(/^\/+/, "");
+  if (!normalizedPath) return null;
+  if (normalizedPath.startsWith("img/member/")) {
+    return `https://www.congress.gov/${normalizedPath}`;
+  }
+
+  return `https://www.congress.gov/img/member/${normalizedPath}`;
+}
+
 function extractMemberParty(member: CongressMemberLike): string | null {
   const history = Array.isArray(member.partyHistory)
     ? member.partyHistory
@@ -329,6 +346,9 @@ function normalizeCongressMembers(members: CongressMemberApiMember[]) {
   return members.map((member) => ({
     ...member,
     party: extractMemberParty(member),
+    depiction: member.depiction?.imageUrl
+      ? { imageUrl: normalizeMemberImageUrl(member.depiction.imageUrl) ?? member.depiction.imageUrl }
+      : member.depiction,
   }));
 }
 
@@ -1039,7 +1059,7 @@ congress.get("/members", async (c) => {
           state: m.state ?? null,
           district: m.district ?? null,
           chamber: extractMemberChamber(m) ?? null,
-          image_url: m.depiction?.imageUrl ?? null,
+          image_url: normalizeMemberImageUrl(m.depiction?.imageUrl) ?? null,
           congress: parseInt(currentCongress, 10),
         }));
       // Fire and forget — don't block the response
@@ -1094,7 +1114,7 @@ congress.get("/members/search", async (c) => {
           state: m.state ?? null,
           district: m.district ?? null,
           chamber: extractMemberChamber(m) ?? null,
-          image_url: m.depiction?.imageUrl ?? null,
+          image_url: normalizeMemberImageUrl(m.depiction?.imageUrl) ?? null,
           congress: parseInt(currentCongress, 10),
         }));
       c.executionCtx.waitUntil(
@@ -1179,7 +1199,9 @@ congress.get("/members/browse", async (c) => {
           state: row.state,
           district: row.district,
           chamber,
-          depiction: row.image_url ? { imageUrl: row.image_url } : undefined,
+          depiction: row.image_url
+            ? { imageUrl: normalizeMemberImageUrl(row.image_url) ?? row.image_url }
+            : undefined,
           firstCongress,
           lastCongress,
           congressesServed,
@@ -2080,7 +2102,15 @@ congress.get("/bills", async (c) => {
       200,
       { "Cache-Control": "public, max-age=600" }
     );
-  } catch {
+  } catch (error) {
+    console.error("Congress bills fetch failed", {
+      congress: congress_num,
+      billType,
+      limit,
+      offset,
+      sort,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
