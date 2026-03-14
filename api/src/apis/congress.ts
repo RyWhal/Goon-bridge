@@ -57,10 +57,171 @@ function dedupeBioguideIds(ids: Array<string | undefined | null>) {
   return [...new Set(ids.map((id) => id?.trim()).filter((id): id is string => !!id))];
 }
 
+const STATE_NAME_BY_CODE: Record<string, string> = {
+  AL: "Alabama",
+  AK: "Alaska",
+  AZ: "Arizona",
+  AR: "Arkansas",
+  CA: "California",
+  CO: "Colorado",
+  CT: "Connecticut",
+  DE: "Delaware",
+  FL: "Florida",
+  GA: "Georgia",
+  HI: "Hawaii",
+  ID: "Idaho",
+  IL: "Illinois",
+  IN: "Indiana",
+  IA: "Iowa",
+  KS: "Kansas",
+  KY: "Kentucky",
+  LA: "Louisiana",
+  ME: "Maine",
+  MD: "Maryland",
+  MA: "Massachusetts",
+  MI: "Michigan",
+  MN: "Minnesota",
+  MS: "Mississippi",
+  MO: "Missouri",
+  MT: "Montana",
+  NE: "Nebraska",
+  NV: "Nevada",
+  NH: "New Hampshire",
+  NJ: "New Jersey",
+  NM: "New Mexico",
+  NY: "New York",
+  NC: "North Carolina",
+  ND: "North Dakota",
+  OH: "Ohio",
+  OK: "Oklahoma",
+  OR: "Oregon",
+  PA: "Pennsylvania",
+  RI: "Rhode Island",
+  SC: "South Carolina",
+  SD: "South Dakota",
+  TN: "Tennessee",
+  TX: "Texas",
+  UT: "Utah",
+  VT: "Vermont",
+  VA: "Virginia",
+  WA: "Washington",
+  WV: "West Virginia",
+  WI: "Wisconsin",
+  WY: "Wyoming",
+  DC: "District of Columbia",
+};
+
 function normalizeBillType(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const cleaned = value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
   return cleaned || null;
+}
+
+function normalizePersonName(value: string | null | undefined): string {
+  return (value ?? "")
+    .toUpperCase()
+    .replace(/[.,']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+type SenateMemberLookup = {
+  bioguideId: string;
+  firstName: string;
+  lastName: string;
+  fullName: string;
+  party: string | null;
+  stateCode: string | null;
+  stateName: string | null;
+};
+
+async function loadSenateMemberLookup(
+  env: Env["Bindings"],
+  apiKey: string,
+  congress: number
+): Promise<SenateMemberLookup[]> {
+  if (hasSupabase(env)) {
+    try {
+      const sb = getSupabase(env);
+      const { data, error } = await sb
+        .from("members")
+        .select("bioguide_id,name,direct_order_name,party,state,chamber,congress")
+        .eq("congress", congress)
+        .eq("chamber", "Senate");
+
+      if (!error && data?.length) {
+        return data.map((row) => {
+          const displayName = row.direct_order_name ?? row.name ?? row.bioguide_id;
+          const normalizedDisplay = displayName.replace(/\s+/g, " ").trim();
+          const parts = normalizedDisplay.split(" ");
+          return {
+            bioguideId: row.bioguide_id,
+            firstName: parts[0] ?? "",
+            lastName: parts.slice(1).join(" ") || parts[0] || "",
+            fullName: normalizedDisplay,
+            party: normalizePartyValue(row.party),
+            stateCode: null,
+            stateName: row.state ?? null,
+          };
+        });
+      }
+    } catch {
+      // Fall through to live member list.
+    }
+  }
+
+  const members = normalizeCongressMembers(await fetchAllCongressMembers(apiKey, String(congress)));
+  return members
+    .filter((member) => extractMemberChamber(member) === "Senate" && member.bioguideId)
+    .map((member) => {
+      const rawName = member.name?.replace(/\s+/g, " ").trim() ?? "";
+      const [lastNameRaw, firstNameRaw] = rawName.split(",").map((part) => part.trim());
+      return {
+        bioguideId: member.bioguideId!,
+        firstName: firstNameRaw ?? "",
+        lastName: lastNameRaw ?? rawName,
+        fullName: member.directOrderName ?? member.name ?? member.bioguideId!,
+        party: normalizePartyValue(member.party),
+        stateCode: null,
+        stateName: typeof member.state === "string" ? member.state : null,
+      };
+    });
+}
+
+function resolveSenateMemberBioguide(
+  member: {
+    firstName?: string;
+    lastName?: string;
+    fullName?: string;
+    party?: string;
+    state?: string;
+  },
+  senators: SenateMemberLookup[]
+): string | null {
+  const stateCode = member.state?.trim().toUpperCase() ?? null;
+  const stateName = stateCode ? (STATE_NAME_BY_CODE[stateCode] ?? null) : null;
+  const party = normalizePartyValue(member.party);
+  const firstName = normalizePersonName(member.firstName);
+  const lastName = normalizePersonName(member.lastName);
+  const fullName = normalizePersonName(member.fullName);
+
+  const matches = senators.filter((senator) => {
+    if (party && senator.party && party !== senator.party) return false;
+    if (stateName && senator.stateName && stateName !== senator.stateName) return false;
+
+    const senatorFirst = normalizePersonName(senator.firstName);
+    const senatorLast = normalizePersonName(senator.lastName);
+    const senatorFull = normalizePersonName(senator.fullName);
+
+    if (lastName && senatorLast !== lastName && !senatorFull.includes(lastName)) return false;
+    if (firstName && senatorFirst && !senatorFirst.startsWith(firstName)) return false;
+    if (fullName && !senatorFull.includes(lastName || fullName.split(" ").slice(-1)[0] || "")) return false;
+
+    return true;
+  });
+
+  if (matches.length === 1) return matches[0].bioguideId;
+  return null;
 }
 
 function parseBillReferenceFromUrl(value: unknown) {
@@ -230,6 +391,94 @@ function extractVoteMembersFromResponse(raw?: Record<string, unknown>): Congress
   }
 
   return extractVoteMembers(nested);
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function getXmlTagText(xml: string, tagName: string): string | null {
+  const match = xml.match(new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, "i"));
+  const value = match?.[1]?.trim();
+  return value ? decodeXmlEntities(value) : null;
+}
+
+function parseSenateVoteXml(xml: string) {
+  if (!xml.includes("<roll_call_vote>")) return null;
+
+  const countSection = getXmlTagText(xml, "count") ?? "";
+  const totalYea = asNumber(getXmlTagText(countSection, "yeas"));
+  const totalNay = asNumber(getXmlTagText(countSection, "nays"));
+  const totalPresent = asNumber(getXmlTagText(countSection, "present"));
+  const totalNotVoting = asNumber(getXmlTagText(countSection, "absent"));
+
+  const members = [...xml.matchAll(/<member>([\s\S]*?)<\/member>/gi)].map((match) => {
+    const memberXml = match[1];
+    const firstName = getXmlTagText(memberXml, "first_name");
+    const lastName = getXmlTagText(memberXml, "last_name");
+    const fullName =
+      getXmlTagText(memberXml, "member_full") ??
+      [firstName, lastName].filter(Boolean).join(" ").trim() ??
+      null;
+
+    return {
+      bioguideId: null,
+      firstName: firstName ?? undefined,
+      lastName: lastName ?? undefined,
+      fullName: fullName ?? undefined,
+      party: getXmlTagText(memberXml, "party") ?? undefined,
+      state: getXmlTagText(memberXml, "state") ?? undefined,
+      votePosition: getXmlTagText(memberXml, "vote_cast") ?? undefined,
+    };
+  });
+
+  return {
+    congress: asNumber(getXmlTagText(xml, "congress")),
+    chamber: "Senate",
+    date: getXmlTagText(xml, "vote_date"),
+    question: getXmlTagText(xml, "question") ?? getXmlTagText(xml, "vote_question_text"),
+    description: getXmlTagText(xml, "vote_title") ?? getXmlTagText(xml, "vote_document_text"),
+    result: getXmlTagText(xml, "vote_result") ?? getXmlTagText(xml, "vote_result_text"),
+    totalYea,
+    totalNay,
+    totalPresent,
+    totalNotVoting,
+    members,
+  };
+}
+
+async function fetchVoteFromSourceUrl(
+  sourceUrl: string,
+  voteMeta: ReturnType<typeof getVoteRouteMeta>,
+  env: Env["Bindings"],
+  apiKey: string,
+  congress: number
+) {
+  if (voteMeta.normalized !== "senate") return null;
+  if (!/^https:\/\/www\.senate\.gov\/legislative\/LIS\/roll_call_votes\/vote\d+\/vote_\d+_\d+_\d+\.xml$/i.test(sourceUrl)) {
+    return null;
+  }
+
+  const resp = await fetch(sourceUrl);
+  if (!resp.ok) return null;
+
+  const xml = await resp.text();
+  const parsed = parseSenateVoteXml(xml);
+  if (!parsed) return null;
+
+  const senators = await loadSenateMemberLookup(env, apiKey, congress);
+  return {
+    ...parsed,
+    members: parsed.members.map((member) => ({
+      ...member,
+      bioguideId: resolveSenateMemberBioguide(member, senators) ?? undefined,
+    })),
+  };
 }
 
 
@@ -1568,11 +1817,16 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
 
   const { congress: cong, chamber, rollCallNumber } = c.req.param();
+  const requestedSession = c.req.query("session")?.trim();
+  const sourceUrl = c.req.query("source_url")?.trim();
 
   const voteMeta = getVoteRouteMeta(chamber);
 
-  // Try session 2 first (more recent), then session 1
-  for (const session of ["2", "1"]) {
+  const sessions = requestedSession && /^(1|2)$/.test(requestedSession)
+    ? [requestedSession, ...(requestedSession === "1" ? ["2"] : ["1"])]
+    : ["2", "1"];
+
+  for (const session of sessions) {
     try {
       const resp = await congressFetch(
         `/${voteMeta.pathPrefix}/${cong}/${session}/${rollCallNumber}`,
@@ -1661,6 +1915,30 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
       }
     } catch {
       // Try next session
+    }
+  }
+
+  if (sourceUrl) {
+    try {
+      const fallbackVote = await fetchVoteFromSourceUrl(
+        sourceUrl,
+        voteMeta,
+        c.env,
+        apiKey,
+        parseInt(cong, 10)
+      );
+      if (fallbackVote) {
+        return c.json(
+          {
+            vote: fallbackVote,
+            raw: { sourceUrl },
+          },
+          200,
+          { "Cache-Control": "public, max-age=1800" }
+        );
+      }
+    } catch {
+      // Fall through to 404 below.
     }
   }
 
