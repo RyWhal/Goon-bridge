@@ -177,6 +177,11 @@ interface MembersRow {
   chamber: string | null;
   image_url: string | null;
   congress: number | null;
+  first_congress: number | null;
+  last_congress: number | null;
+  total_terms: number | null;
+  congresses_served: number | null;
+  years_served: number | null;
   updated_at: string;
 }
 
@@ -190,6 +195,11 @@ interface MembersInsert {
   chamber?: string | null;
   image_url?: string | null;
   congress?: number | null;
+  first_congress?: number | null;
+  last_congress?: number | null;
+  total_terms?: number | null;
+  congresses_served?: number | null;
+  years_served?: number | null;
   updated_at?: string;
 }
 
