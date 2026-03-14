@@ -66,5 +66,17 @@ export function useApi<T>() {
     }
   }, []);
 
-  return { ...state, fetchData };
+  const setData = useCallback((data: T) => {
+    setState({ data, loading: false, error: null });
+  }, []);
+
+  const setError = useCallback((error: string) => {
+    setState({ data: null, loading: false, error });
+  }, []);
+
+  const setLoading = useCallback(() => {
+    setState({ data: null, loading: true, error: null });
+  }, []);
+
+  return { ...state, fetchData, setData, setError, setLoading };
 }

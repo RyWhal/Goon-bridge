@@ -359,7 +359,7 @@ correlation.post("/refresh/organization/:symbol/activity", async (c) => {
   try {
     const [lobbying, contracts] = await Promise.all([
       fetchInternalJson<{ data?: unknown[] }>(c, `/api/finnhub/lobbying?symbol=${encodeURIComponent(symbol)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
-      fetchInternalJson<{ data?: unknown[] }>(c, `/api/finnhub/usa-spending?symbol=${encodeURIComponent(symbol)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+      fetchInternalJson<{ data?: unknown[] }>(c, `/api/usaspending/awards?symbol=${encodeURIComponent(symbol)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
     ]);
 
     const sb = getSupabase(c.env);

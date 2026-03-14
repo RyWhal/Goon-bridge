@@ -108,6 +108,7 @@ interface RecordedVoteRef {
   rollNumber?: string | number;
   sessionNumber?: string | number;
   date?: string;
+  url?: string;
 }
 
 interface BillActionItem {
@@ -1115,10 +1116,15 @@ function RecordedVoteCard({
 
   useEffect(() => {
     if (!vote.congress || !vote.chamber || !vote.rollNumber) return;
+    const params = new URLSearchParams();
+    if (vote.sessionNumber != null) params.set("session", String(vote.sessionNumber));
+    if (vote.url) params.set("source_url", vote.url);
     detail.fetchData(
-      `/api/congress/votes/${vote.congress}/${vote.chamber.toLowerCase()}/${vote.rollNumber}`
+      `/api/congress/votes/${vote.congress}/${vote.chamber.toLowerCase()}/${vote.rollNumber}${
+        params.size ? `?${params.toString()}` : ""
+      }`
     );
-  }, [vote.chamber, vote.congress, vote.rollNumber]);
+  }, [vote.chamber, vote.congress, vote.rollNumber, vote.sessionNumber, vote.url]);
 
   const members = useMemo(() => getVoteMembers(detail.data?.vote), [detail.data]);
   const totals = getVoteTotals(detail.data?.vote);

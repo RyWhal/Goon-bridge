@@ -6,6 +6,7 @@ import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { congress } from "./apis/congress";
 import { openfec } from "./apis/openfec";
 import { finnhub } from "./apis/finnhub";
+import { usaspending } from "./apis/usaspending";
 import { weather } from "./apis/weather";
 import { earthquakes } from "./apis/earthquakes";
 import { sunrise } from "./apis/sunrise";
@@ -65,6 +66,7 @@ app.get("/api/health", async (c) => {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,
       finnhub: !!c.env.FINNHUB_API_KEY,
+      usaspending: true,
       supabase: supabaseStatus,
       weather: true,
       earthquakes: true,
@@ -79,6 +81,7 @@ app.get("/api/health", async (c) => {
 app.route("/api/congress", congress);
 app.route("/api/fec", openfec);
 app.route("/api/finnhub", finnhub);
+app.route("/api/usaspending", usaspending);
 app.route("/api/weather", weather);
 app.route("/api/earthquakes", earthquakes);
 app.route("/api/sunrise", sunrise);
