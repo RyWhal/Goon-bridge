@@ -1,5 +1,5 @@
 /**
- * Supabase database types — mirrors the schema in supabase/migrations/001_initial_schema.sql
+ * Supabase database types — mirrors the schema in supabase/migrations/*.sql
  *
  * Once the Supabase project is live, these can be auto-generated via:
  *   npx supabase gen types typescript --project-id <id> > api/src/lib/db-types.ts
@@ -49,6 +49,96 @@ export interface Database {
         Update: Partial<ContributionsInsert>;
         Relationships: [];
       };
+      candidate_contribution_summaries: {
+        Row: CandidateContributionSummariesRow;
+        Insert: CandidateContributionSummariesInsert;
+        Update: Partial<CandidateContributionSummariesInsert>;
+        Relationships: [];
+      };
+      organizations: {
+        Row: OrganizationsRow;
+        Insert: OrganizationsInsert;
+        Update: Partial<OrganizationsInsert>;
+        Relationships: [];
+      };
+      organization_aliases: {
+        Row: OrganizationAliasesRow;
+        Insert: OrganizationAliasesInsert;
+        Update: Partial<OrganizationAliasesInsert>;
+        Relationships: [];
+      };
+      organization_identifiers: {
+        Row: OrganizationIdentifiersRow;
+        Insert: OrganizationIdentifiersInsert;
+        Update: Partial<OrganizationIdentifiersInsert>;
+        Relationships: [];
+      };
+      organization_lobbying_filings: {
+        Row: OrganizationLobbyingFilingsRow;
+        Insert: OrganizationLobbyingFilingsInsert;
+        Update: Partial<OrganizationLobbyingFilingsInsert>;
+        Relationships: [];
+      };
+      organization_contract_awards: {
+        Row: OrganizationContractAwardsRow;
+        Insert: OrganizationContractAwardsInsert;
+        Update: Partial<OrganizationContractAwardsInsert>;
+        Relationships: [];
+      };
+      member_committee_assignments: {
+        Row: MemberCommitteeAssignmentsRow;
+        Insert: MemberCommitteeAssignmentsInsert;
+        Update: Partial<MemberCommitteeAssignmentsInsert>;
+        Relationships: [];
+      };
+      member_subcommittee_assignments: {
+        Row: MemberSubcommitteeAssignmentsRow;
+        Insert: MemberSubcommitteeAssignmentsInsert;
+        Update: Partial<MemberSubcommitteeAssignmentsInsert>;
+        Relationships: [];
+      };
+      disclosure_filings: {
+        Row: DisclosureFilingsRow;
+        Insert: DisclosureFilingsInsert;
+        Update: Partial<DisclosureFilingsInsert>;
+        Relationships: [];
+      };
+      disclosure_filing_text: {
+        Row: DisclosureFilingTextRow;
+        Insert: DisclosureFilingTextInsert;
+        Update: Partial<DisclosureFilingTextInsert>;
+        Relationships: [];
+      };
+      disclosure_trade_rows: {
+        Row: DisclosureTradeRowsRow;
+        Insert: DisclosureTradeRowsInsert;
+        Update: Partial<DisclosureTradeRowsInsert>;
+        Relationships: [];
+      };
+      disclosure_ingest_failures: {
+        Row: DisclosureIngestFailuresRow;
+        Insert: DisclosureIngestFailuresInsert;
+        Update: Partial<DisclosureIngestFailuresInsert>;
+        Relationships: [];
+      };
+      member_stock_trades: {
+        Row: MemberStockTradesRow;
+        Insert: MemberStockTradesInsert;
+        Update: Partial<MemberStockTradesInsert>;
+        Relationships: [];
+      };
+      relationship_facts: {
+        Row: RelationshipFactsRow;
+        Insert: RelationshipFactsInsert;
+        Update: Partial<RelationshipFactsInsert>;
+        Relationships: [];
+      };
+      correlation_cases: {
+        Row: CorrelationCasesRow;
+        Insert: CorrelationCasesInsert;
+        Update: Partial<CorrelationCasesInsert>;
+        Relationships: [];
+      };
     };
     Views: {
       donor_summary: {
@@ -57,6 +147,10 @@ export interface Database {
       };
       member_voting_record: {
         Row: MemberVotingRecordRow;
+        Relationships: [];
+      };
+      member_correlation_cases: {
+        Row: MemberCorrelationCasesRow;
         Relationships: [];
       };
     };
@@ -72,8 +166,6 @@ export interface Database {
     CompositeTypes: Record<string, never>;
   };
 }
-
-// ── Members ──────────────────────────────────────────────────────────────────
 
 interface MembersRow {
   bioguide_id: string;
@@ -100,8 +192,6 @@ interface MembersInsert {
   congress?: number | null;
   updated_at?: string;
 }
-
-// ── Votes ────────────────────────────────────────────────────────────────────
 
 interface VotesRow {
   id: number;
@@ -139,8 +229,6 @@ interface VotesInsert {
   updated_at?: string;
 }
 
-// ── Member Votes ─────────────────────────────────────────────────────────────
-
 interface MemberVotesRow {
   id: number;
   vote_id: number;
@@ -154,8 +242,6 @@ interface MemberVotesInsert {
   bioguide_id: string;
   position: string;
 }
-
-// ── Member Vote Stats ────────────────────────────────────────────────────────
 
 interface MemberVoteStatsRow {
   bioguide_id: string;
@@ -194,8 +280,6 @@ interface MemberVoteStatsInsert {
   last_congress?: number | null;
   updated_at?: string;
 }
-
-// ── Bills ────────────────────────────────────────────────────────────────────
 
 interface BillsRow {
   id: number;
@@ -243,8 +327,6 @@ interface BillsInsert {
   updated_at?: string;
 }
 
-// ── FEC Candidates ───────────────────────────────────────────────────────────
-
 interface FecCandidatesRow {
   candidate_id: string;
   bioguide_id: string | null;
@@ -266,8 +348,6 @@ interface FecCandidatesInsert {
   election_years?: number[] | null;
   updated_at?: string;
 }
-
-// ── Contributions ────────────────────────────────────────────────────────────
 
 interface ContributionsRow {
   id: number;
@@ -299,7 +379,531 @@ interface ContributionsInsert {
   updated_at?: string;
 }
 
-// ── Views ────────────────────────────────────────────────────────────────────
+interface CandidateContributionSummariesRow {
+  candidate_id: string;
+  two_year_period: number;
+  committee_id: string | null;
+  payload: Record<string, unknown>;
+  updated_at: string;
+}
+
+interface CandidateContributionSummariesInsert {
+  candidate_id: string;
+  two_year_period: number;
+  committee_id?: string | null;
+  payload: Record<string, unknown>;
+  updated_at?: string;
+}
+
+interface OrganizationsRow {
+  id: number;
+  canonical_name: string;
+  normalized_name: string;
+  ticker: string | null;
+  parent_organization_id: number | null;
+  source_coverage: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrganizationsInsert {
+  id?: number;
+  canonical_name: string;
+  normalized_name: string;
+  ticker?: string | null;
+  parent_organization_id?: number | null;
+  source_coverage?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface OrganizationAliasesRow {
+  id: number;
+  organization_id: number;
+  alias: string;
+  normalized_alias: string;
+  source_type: string;
+  source_row_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrganizationAliasesInsert {
+  id?: number;
+  organization_id: number;
+  alias: string;
+  normalized_alias: string;
+  source_type: string;
+  source_row_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface OrganizationIdentifiersRow {
+  id: number;
+  organization_id: number;
+  source_type: string;
+  identifier_type: string;
+  identifier_value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrganizationIdentifiersInsert {
+  id?: number;
+  organization_id: number;
+  source_type: string;
+  identifier_type: string;
+  identifier_value: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface OrganizationLobbyingFilingsRow {
+  id: number;
+  organization_id: number | null;
+  ticker: string | null;
+  symbol: string | null;
+  filing_uuid: string | null;
+  source_row_key: string;
+  name: string | null;
+  normalized_name: string | null;
+  description: string | null;
+  country: string | null;
+  year: number | null;
+  period: string | null;
+  filing_type: string | null;
+  document_url: string | null;
+  income: number | null;
+  expenses: number | null;
+  posted_name: string | null;
+  dt_posted: string | null;
+  client_id: string | null;
+  registrant_id: string | null;
+  senate_id: string | null;
+  house_registrant_id: string | null;
+  chambers: string[];
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrganizationLobbyingFilingsInsert {
+  id?: number;
+  organization_id?: number | null;
+  ticker?: string | null;
+  symbol?: string | null;
+  filing_uuid?: string | null;
+  source_row_key: string;
+  name?: string | null;
+  normalized_name?: string | null;
+  description?: string | null;
+  country?: string | null;
+  year?: number | null;
+  period?: string | null;
+  filing_type?: string | null;
+  document_url?: string | null;
+  income?: number | null;
+  expenses?: number | null;
+  posted_name?: string | null;
+  dt_posted?: string | null;
+  client_id?: string | null;
+  registrant_id?: string | null;
+  senate_id?: string | null;
+  house_registrant_id?: string | null;
+  chambers?: string[];
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface OrganizationContractAwardsRow {
+  id: number;
+  organization_id: number | null;
+  ticker: string | null;
+  symbol: string | null;
+  source_row_key: string;
+  recipient_name: string | null;
+  recipient_parent_name: string | null;
+  normalized_recipient_name: string | null;
+  normalized_parent_name: string | null;
+  country: string | null;
+  total_value: number | null;
+  action_date: string | null;
+  performance_start_date: string | null;
+  performance_end_date: string | null;
+  awarding_agency_name: string | null;
+  awarding_sub_agency_name: string | null;
+  awarding_office_name: string | null;
+  performance_country: string | null;
+  performance_city: string | null;
+  performance_county: string | null;
+  performance_state: string | null;
+  performance_zip_code: string | null;
+  performance_congressional_district: string | null;
+  award_description: string | null;
+  naics_code: string | null;
+  permalink: string | null;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrganizationContractAwardsInsert {
+  id?: number;
+  organization_id?: number | null;
+  ticker?: string | null;
+  symbol?: string | null;
+  source_row_key: string;
+  recipient_name?: string | null;
+  recipient_parent_name?: string | null;
+  normalized_recipient_name?: string | null;
+  normalized_parent_name?: string | null;
+  country?: string | null;
+  total_value?: number | null;
+  action_date?: string | null;
+  performance_start_date?: string | null;
+  performance_end_date?: string | null;
+  awarding_agency_name?: string | null;
+  awarding_sub_agency_name?: string | null;
+  awarding_office_name?: string | null;
+  performance_country?: string | null;
+  performance_city?: string | null;
+  performance_county?: string | null;
+  performance_state?: string | null;
+  performance_zip_code?: string | null;
+  performance_congressional_district?: string | null;
+  award_description?: string | null;
+  naics_code?: string | null;
+  permalink?: string | null;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface MemberCommitteeAssignmentsRow {
+  id: number;
+  bioguide_id: string;
+  committee_code: string | null;
+  committee_name: string;
+  normalized_committee_name: string;
+  chamber: string | null;
+  congress: number | null;
+  role: string | null;
+  source_row_key: string;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemberCommitteeAssignmentsInsert {
+  id?: number;
+  bioguide_id: string;
+  committee_code?: string | null;
+  committee_name: string;
+  normalized_committee_name: string;
+  chamber?: string | null;
+  congress?: number | null;
+  role?: string | null;
+  source_row_key: string;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface MemberSubcommitteeAssignmentsRow {
+  id: number;
+  bioguide_id: string;
+  committee_assignment_id: number | null;
+  parent_committee_code: string | null;
+  parent_committee_name: string | null;
+  subcommittee_code: string | null;
+  subcommittee_name: string;
+  normalized_subcommittee_name: string;
+  chamber: string | null;
+  congress: number | null;
+  role: string | null;
+  source_row_key: string;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemberSubcommitteeAssignmentsInsert {
+  id?: number;
+  bioguide_id: string;
+  committee_assignment_id?: number | null;
+  parent_committee_code?: string | null;
+  parent_committee_name?: string | null;
+  subcommittee_code?: string | null;
+  subcommittee_name: string;
+  normalized_subcommittee_name: string;
+  chamber?: string | null;
+  congress?: number | null;
+  role?: string | null;
+  source_row_key: string;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DisclosureFilingsRow {
+  id: number;
+  chamber: string;
+  source_type: string;
+  filing_identifier: string;
+  source_row_key: string;
+  filing_type: string | null;
+  member_name: string | null;
+  member_first_name: string | null;
+  member_last_name: string | null;
+  member_state: string | null;
+  member_bioguide_id: string | null;
+  candidate_state: string | null;
+  document_url: string | null;
+  archive_url: string | null;
+  filed_date: string | null;
+  disclosure_date: string | null;
+  filing_status: string;
+  fetch_status: string;
+  parse_status: string;
+  checksum_sha256: string | null;
+  quarantine_reason: string | null;
+  raw_metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DisclosureFilingsInsert {
+  id?: number;
+  chamber: string;
+  source_type: string;
+  filing_identifier: string;
+  source_row_key: string;
+  filing_type?: string | null;
+  member_name?: string | null;
+  member_first_name?: string | null;
+  member_last_name?: string | null;
+  member_state?: string | null;
+  member_bioguide_id?: string | null;
+  candidate_state?: string | null;
+  document_url?: string | null;
+  archive_url?: string | null;
+  filed_date?: string | null;
+  disclosure_date?: string | null;
+  filing_status?: string;
+  fetch_status?: string;
+  parse_status?: string;
+  checksum_sha256?: string | null;
+  quarantine_reason?: string | null;
+  raw_metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DisclosureFilingTextRow {
+  id: number;
+  filing_id: number;
+  parser_version: string;
+  extraction_method: string | null;
+  extraction_status: string;
+  extracted_text: string | null;
+  parse_diagnostics: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DisclosureFilingTextInsert {
+  id?: number;
+  filing_id: number;
+  parser_version: string;
+  extraction_method?: string | null;
+  extraction_status?: string;
+  extracted_text?: string | null;
+  parse_diagnostics?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DisclosureTradeRowsRow {
+  id: number;
+  filing_id: number;
+  source_row_key: string;
+  row_ordinal: number;
+  owner_label: string | null;
+  owner_type: string | null;
+  asset_name: string | null;
+  normalized_asset_name: string | null;
+  asset_type: string | null;
+  symbol_guess: string | null;
+  transaction_type: string | null;
+  transaction_date: string | null;
+  notification_date: string | null;
+  amount_range: string | null;
+  is_public_equity: boolean;
+  parse_confidence: string | null;
+  organization_id: number | null;
+  member_bioguide_id: string | null;
+  quarantine_reason: string | null;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DisclosureTradeRowsInsert {
+  id?: number;
+  filing_id: number;
+  source_row_key: string;
+  row_ordinal: number;
+  owner_label?: string | null;
+  owner_type?: string | null;
+  asset_name?: string | null;
+  normalized_asset_name?: string | null;
+  asset_type?: string | null;
+  symbol_guess?: string | null;
+  transaction_type?: string | null;
+  transaction_date?: string | null;
+  notification_date?: string | null;
+  amount_range?: string | null;
+  is_public_equity?: boolean;
+  parse_confidence?: string | null;
+  organization_id?: number | null;
+  member_bioguide_id?: string | null;
+  quarantine_reason?: string | null;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DisclosureIngestFailuresRow {
+  id: number;
+  filing_id: number | null;
+  source_type: string;
+  stage: string;
+  error_code: string | null;
+  error_message: string;
+  retryable: boolean;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+}
+
+interface DisclosureIngestFailuresInsert {
+  id?: number;
+  filing_id?: number | null;
+  source_type: string;
+  stage: string;
+  error_code?: string | null;
+  error_message: string;
+  retryable?: boolean;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+}
+
+interface MemberStockTradesRow {
+  id: number;
+  bioguide_id: string;
+  organization_id: number | null;
+  disclosure_filing_id: number | null;
+  source_type: string;
+  source_row_key: string;
+  symbol: string | null;
+  asset_name: string | null;
+  normalized_asset_name: string | null;
+  transaction_date: string | null;
+  disclosure_date: string | null;
+  transaction_type: string | null;
+  amount_range: string | null;
+  share_count: number | null;
+  owner_label: string | null;
+  owner_type: string | null;
+  asset_type: string | null;
+  parse_confidence: string | null;
+  raw_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemberStockTradesInsert {
+  id?: number;
+  bioguide_id: string;
+  organization_id?: number | null;
+  disclosure_filing_id?: number | null;
+  source_type: string;
+  source_row_key: string;
+  symbol?: string | null;
+  asset_name?: string | null;
+  normalized_asset_name?: string | null;
+  transaction_date?: string | null;
+  disclosure_date?: string | null;
+  transaction_type?: string | null;
+  amount_range?: string | null;
+  share_count?: number | null;
+  owner_label?: string | null;
+  owner_type?: string | null;
+  asset_type?: string | null;
+  parse_confidence?: string | null;
+  raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface RelationshipFactsRow {
+  id: number;
+  member_bioguide_id: string | null;
+  organization_id: number | null;
+  fact_type: string;
+  related_entity_type: string | null;
+  related_entity_id: string | null;
+  fact_date: string | null;
+  source_table: string;
+  source_row_id: string;
+  evidence_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RelationshipFactsInsert {
+  id?: number;
+  member_bioguide_id?: string | null;
+  organization_id?: number | null;
+  fact_type: string;
+  related_entity_type?: string | null;
+  related_entity_id?: string | null;
+  fact_date?: string | null;
+  source_table: string;
+  source_row_id: string;
+  evidence_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface CorrelationCasesRow {
+  id: number;
+  member_bioguide_id: string;
+  organization_id: number | null;
+  case_type: string;
+  summary: string;
+  event_date: string | null;
+  time_window_days: number | null;
+  evidence_payload: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CorrelationCasesInsert {
+  id?: number;
+  member_bioguide_id: string;
+  organization_id?: number | null;
+  case_type: string;
+  summary: string;
+  event_date?: string | null;
+  time_window_days?: number | null;
+  evidence_payload?: Record<string, unknown>;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
 
 interface DonorSummaryRow {
   candidate_id: string;
@@ -331,4 +935,20 @@ interface MemberVotingRecordRow {
   policy_area: string | null;
   position: string;
   normalized_position: string;
+}
+
+interface MemberCorrelationCasesRow {
+  id: number;
+  member_bioguide_id: string;
+  member_name: string;
+  organization_id: number | null;
+  organization_name: string | null;
+  organization_ticker: string | null;
+  case_type: string;
+  summary: string;
+  event_date: string | null;
+  time_window_days: number | null;
+  status: string;
+  evidence_payload: Record<string, unknown>;
+  updated_at: string;
 }

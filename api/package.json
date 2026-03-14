@@ -5,11 +5,15 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "disclosures:house": "node scripts/house_disclosures.mjs",
+    "disclosures:house:batch": "node scripts/house_disclosures_backfill.mjs",
+    "correlations:activity:trades": "node scripts/refresh_trade_org_activity.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.0",
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "pdfjs-dist": "^5.5.207"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241022.0",
