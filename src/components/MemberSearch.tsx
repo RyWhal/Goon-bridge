@@ -39,6 +39,21 @@ interface MemberTerm {
   memberType?: string;
 }
 
+function summarizeDisplayedTerms(terms: MemberTerm[] | undefined) {
+  const allTerms = Array.isArray(terms) ? terms : [];
+  const congresses = allTerms
+    .map((term) => term.congress)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  return {
+    congressesServed: congresses.length ? new Set(congresses).size : allTerms.length,
+    chamber:
+      allTerms.length > 0
+        ? allTerms[allTerms.length - 1]?.chamber
+        : undefined,
+  };
+}
+
 interface MemberDetailResponse {
   member?: {
     bioguideId?: string;
@@ -119,6 +134,33 @@ export function MemberSearch() {
     browse.fetchData(`/api/congress/members/browse?congress=${congress}`);
     setExpandedId(null);
   }, [browse.fetchData, congress]);
+
+  useEffect(() => {
+    if (!expandedId || !browse.data?.members || !detail.data?.member) return;
+
+    const { congressesServed, chamber } = summarizeDisplayedTerms(detail.data.member.terms);
+    const existingMember = browse.data.members.find((member) => member.bioguideId === expandedId);
+    if (!existingMember) return;
+    if (
+      existingMember.congressesServed === congressesServed &&
+      (chamber == null || existingMember.chamber === chamber)
+    ) {
+      return;
+    }
+
+    browse.setData({
+      ...browse.data,
+      members: browse.data.members.map((member) =>
+        member.bioguideId === expandedId
+          ? {
+              ...member,
+              congressesServed,
+              chamber: chamber ?? member.chamber,
+            }
+          : member
+      ),
+    });
+  }, [browse.data, browse.setData, detail.data, expandedId]);
 
   const handleMemberClick = (bioguideId: string) => {
     if (expandedId === bioguideId) {
