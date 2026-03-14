@@ -7,6 +7,11 @@
 - Official disclosures via STOCK Act filings on clerk.house.gov and efts.senate.gov
 - Map trades to votes/legislation for correlation analysis
 
+### USAspending Fallback Cleanup
+- Current local behavior: `/api/usaspending/awards` can 502 in Wrangler/Miniflare while the browser-side direct USAspending fallback still succeeds and renders award content
+- Keep surfacing the Worker 502 for debugging in the short term
+- Later cleanup: make the fallback path explicit in UI/dev logging so successful fallback does not look like a broken awards experience
+
 ### Stock Prices Before and After Votes
 - Pull historical OHLCV data around vote dates (e.g. via Yahoo Finance, Polygon.io, or Alpha Vantage)
 - Define a window (e.g. T-5 to T+5 days around a vote) and measure price movement
