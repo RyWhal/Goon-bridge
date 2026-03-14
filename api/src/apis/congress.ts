@@ -563,6 +563,24 @@ function textMatches(source: string | undefined | null, query: string | undefine
   return normalizeText(source).includes(normalizedQuery);
 }
 
+function normalizeDateValue(value: string | undefined | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function dateInRange(
+  value: string | undefined | null,
+  startDate: string | null,
+  endDate: string | null
+) {
+  const normalizedValue = normalizeDateValue(value);
+  if (!normalizedValue) return !startDate && !endDate;
+  if (startDate && normalizedValue < startDate) return false;
+  if (endDate && normalizedValue > endDate) return false;
+  return true;
+}
+
 function dedupeStrings(values: Array<string | undefined | null>): string[] {
   const unique = new Set<string>();
   for (const value of values) {
@@ -784,10 +802,25 @@ function normalizeBillForList(
 function billMatchesSummaryFilters(
   bill: ReturnType<typeof normalizeBillForList>,
   status: string | null,
-  latestAction: string | null
+  search: string | null,
+  startDate: string | null,
+  endDate: string | null
 ) {
   if (status && bill.status.key !== status) return false;
-  if (!textMatches(bill.latestAction?.text, latestAction)) return false;
+  if (!dateInRange(bill.latestAction?.actionDate ?? bill.updateDate ?? bill.introducedDate, startDate, endDate)) {
+    return false;
+  }
+
+  const searchableFields = [
+    bill.title,
+    bill.latestAction?.text,
+    bill.policyArea?.name,
+    bill.sponsor?.fullName,
+    bill.sponsor?.state,
+    bill.originChamber,
+    ...bill.committees,
+  ];
+  if (search && !searchableFields.some((field) => textMatches(field, search))) return false;
   return true;
 }
 
@@ -804,6 +837,36 @@ function billMatchesMetadataFilters(
     if (!matchedCommittee) return false;
   }
   return true;
+}
+
+function getBillSortDateValue(
+  bill: ReturnType<typeof normalizeBillForList>,
+  sort: string
+): string {
+  if (sort.startsWith("introducedDate")) {
+    return bill.introducedDate ?? bill.latestAction?.actionDate ?? bill.updateDate ?? "";
+  }
+
+  return bill.latestAction?.actionDate ?? bill.updateDate ?? bill.introducedDate ?? "";
+}
+
+function compareNormalizedBills(
+  left: ReturnType<typeof normalizeBillForList>,
+  right: ReturnType<typeof normalizeBillForList>,
+  sort: string
+) {
+  const ascending = sort.endsWith("+asc");
+  const leftDate = getBillSortDateValue(left, sort);
+  const rightDate = getBillSortDateValue(right, sort);
+  const dateComparison = ascending
+    ? leftDate.localeCompare(rightDate)
+    : rightDate.localeCompare(leftDate);
+
+  if (dateComparison !== 0) return dateComparison;
+
+  const leftLabel = `${left.type ?? ""}-${left.number ?? ""}-${left.title ?? ""}`;
+  const rightLabel = `${right.type ?? ""}-${right.number ?? ""}-${right.title ?? ""}`;
+  return leftLabel.localeCompare(rightLabel);
 }
 
 function toBillCacheRow(bill: CongressBillLike, committeeNames?: string[]) {
@@ -1856,15 +1919,25 @@ congress.get("/bills", async (c) => {
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, BILL_SCAN_MAX_OFFSET);
   const sort = c.req.query("sort") ?? "updateDate+desc";
   const status = normalizeText(c.req.query("status"));
-  const latestAction = c.req.query("latestAction")?.trim() ?? "";
+  const search = c.req.query("search")?.trim() ?? "";
+  const requestedStartDate = normalizeDateValue(c.req.query("startDate"));
+  const requestedEndDate = normalizeDateValue(c.req.query("endDate"));
+  const startDate =
+    requestedStartDate && requestedEndDate && requestedStartDate > requestedEndDate
+      ? requestedEndDate
+      : requestedStartDate;
+  const endDate =
+    requestedStartDate && requestedEndDate && requestedStartDate > requestedEndDate
+      ? requestedStartDate
+      : requestedEndDate;
   const sponsorParty = normalizePartyValue(c.req.query("sponsorParty"));
   const sponsor = c.req.query("sponsor")?.trim() ?? "";
   const committee = c.req.query("committee")?.trim() ?? "";
 
-  const hasSummaryFilters = Boolean(status || latestAction);
+  const requiresLocalActivitySort = sort.startsWith("updateDate");
+  const hasSummaryFilters = Boolean(status || search || startDate || endDate);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
-  const requiresScan = hasSummaryFilters || hasMetadataFilters;
-  const requiredMatches = offset + limit + 1;
+  const requiresScan = hasSummaryFilters || hasMetadataFilters || requiresLocalActivitySort;
 
   try {
     if (!requiresScan) {
@@ -1873,7 +1946,7 @@ congress.get("/bills", async (c) => {
       const normalizedBills = (data.bills ?? []).map((bill) => {
         const identity = getBillIdentity(bill);
         return normalizeBillForList(bill, identity ? cachedBills.get(identity.key) : undefined);
-      });
+      }).sort((left, right) => compareNormalizedBills(left, right, sort));
 
       const cacheRows = (data.bills ?? [])
         .map((bill) => toBillCacheRow(bill))
@@ -1900,9 +1973,7 @@ congress.get("/bills", async (c) => {
 
     const matchedBills: Array<ReturnType<typeof normalizeBillForList>> = [];
     const cacheRowsToUpsert: Array<Record<string, unknown>> = [];
-    let matchedCount = 0;
     let scannedCount = 0;
-    let hasMore = false;
     let metadataFetches = 0;
     let truncatedForBudget = false;
 
@@ -1935,7 +2006,9 @@ congress.get("/bills", async (c) => {
             normalized: normalizeBillForList(bill, cached),
           };
         })
-        .filter((entry) => billMatchesSummaryFilters(entry.normalized, status, latestAction));
+        .filter((entry) =>
+          billMatchesSummaryFilters(entry.normalized, status, search, startDate, endDate)
+        );
 
       const resolvedCandidates = hasMetadataFilters
         ? await mapInBatches(summaryCandidates, 5, async (entry) => {
@@ -1972,17 +2045,10 @@ congress.get("/bills", async (c) => {
 
       for (const bill of resolvedCandidates) {
         if (!bill) continue;
-        if (matchedCount >= offset && matchedBills.length < limit) {
-          matchedBills.push(bill);
-        }
-        matchedCount += 1;
-        if (matchedCount >= requiredMatches) {
-          hasMore = true;
-          break;
-        }
+        matchedBills.push(bill);
       }
 
-      if (hasMore || truncatedForBudget || !data.pagination?.next || pageBills.length < BILL_SCAN_PAGE_SIZE) {
+      if (truncatedForBudget || !data.pagination?.next || pageBills.length < BILL_SCAN_PAGE_SIZE) {
         break;
       }
     }
@@ -1991,20 +2057,22 @@ congress.get("/bills", async (c) => {
       c.executionCtx.waitUntil(upsertCachedBills(c.env, cacheRowsToUpsert));
     }
 
+    matchedBills.sort((left, right) => compareNormalizedBills(left, right, sort));
+    const pagedBills = matchedBills.slice(offset, offset + limit);
+    const matchedCount = matchedBills.length;
+
     return c.json(
       {
-        bills: matchedBills,
-        count: hasMore || truncatedForBudget ? undefined : matchedCount,
+        bills: pagedBills,
+        count: truncatedForBudget ? undefined : matchedCount,
         notice: truncatedForBudget
           ? "Filtered results were capped to stay within production runtime limits. Browse further or warm the bill cache for broader sponsor and committee searches."
-          : hasMore
-            ? "Filtered pagination is running in windowed mode in production, so total counts are omitted until the full result set has been scanned."
-            : undefined,
+          : undefined,
         pagination: {
           offset,
           limit,
-          count: hasMore || truncatedForBudget ? undefined : matchedCount,
-          hasMore: hasMore || offset + limit < matchedCount,
+          count: truncatedForBudget ? undefined : matchedCount,
+          hasMore: truncatedForBudget || offset + limit < matchedCount,
           filtered: true,
           scanned: scannedCount,
         },

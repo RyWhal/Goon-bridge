@@ -402,20 +402,25 @@ export function BillSearch() {
   const [congress, setCongress] = useState("119");
   const [billType, setBillType] = useState("");
   const [limit, setLimit] = useState("20");
+  const [sortBy, setSortBy] = useState("updateDate+desc");
   const [statusFilter, setStatusFilter] = useState("");
-  const [latestActionFilter, setLatestActionFilter] = useState("");
+  const [searchFilter, setSearchFilter] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [sponsorParty, setSponsorParty] = useState("");
   const [sponsorFilter, setSponsorFilter] = useState("");
   const [committeeFilter, setCommitteeFilter] = useState("");
-  const [includeVibeData, setIncludeVibeData] = useState<"off" | "placeholder">("off");
   const [offset, setOffset] = useState(0);
   const [expandedBillKey, setExpandedBillKey] = useState<string | null>(null);
   const [submittedFilters, setSubmittedFilters] = useState({
     congress: "119",
     billType: "",
     limit: "20",
+    sortBy: "updateDate+desc",
     statusFilter: "",
-    latestActionFilter: "",
+    searchFilter: "",
+    startDate: "",
+    endDate: "",
     sponsorParty: "",
     sponsorFilter: "",
     committeeFilter: "",
@@ -432,13 +437,15 @@ export function BillSearch() {
       congress: submittedFilters.congress,
       limit: submittedFilters.limit,
       offset: String(offset),
-      sort: "updateDate+desc",
+      sort: submittedFilters.sortBy,
     });
     if (submittedFilters.billType) params.set("type", submittedFilters.billType);
     if (submittedFilters.statusFilter) params.set("status", submittedFilters.statusFilter);
-    if (submittedFilters.latestActionFilter) {
-      params.set("latestAction", submittedFilters.latestActionFilter);
+    if (submittedFilters.searchFilter) {
+      params.set("search", submittedFilters.searchFilter);
     }
+    if (submittedFilters.startDate) params.set("startDate", submittedFilters.startDate);
+    if (submittedFilters.endDate) params.set("endDate", submittedFilters.endDate);
     if (submittedFilters.sponsorParty) params.set("sponsorParty", submittedFilters.sponsorParty);
     if (submittedFilters.sponsorFilter) params.set("sponsor", submittedFilters.sponsorFilter);
     if (submittedFilters.committeeFilter) params.set("committee", submittedFilters.committeeFilter);
@@ -451,8 +458,11 @@ export function BillSearch() {
       congress,
       billType,
       limit,
+      sortBy,
       statusFilter,
-      latestActionFilter: latestActionFilter.trim(),
+      searchFilter: searchFilter.trim(),
+      startDate,
+      endDate,
       sponsorParty,
       sponsorFilter: sponsorFilter.trim(),
       committeeFilter: committeeFilter.trim(),
@@ -525,21 +535,55 @@ export function BillSearch() {
           </select>
           <select
             className="select"
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value)}
           >
-            {BILL_STATUS_OPTIONS.map((option) => (
-              <option key={option.value || "all"} value={option.value}>
-                {option.label}
-              </option>
-            ))}
+            <option value="updateDate+desc">Newest activity</option>
+            <option value="updateDate+asc">Oldest activity</option>
+            <option value="introducedDate+desc">Newest introduced</option>
+            <option value="introducedDate+asc">Oldest introduced</option>
           </select>
-          <input
-            className="input lg:col-span-2"
-            value={latestActionFilter}
-            onChange={(event) => setLatestActionFilter(event.target.value)}
-            placeholder="Filter latest action text"
-          />
+          <div className="grid grid-cols-1 gap-2 lg:col-span-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+            <select
+              className="select"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              {BILL_STATUS_OPTIONS.map((option) => (
+                <option key={option.value || "all"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <input
+              className="input"
+              value={searchFilter}
+              onChange={(event) => setSearchFilter(event.target.value)}
+              placeholder="Search title, action text, sponsor, committee..."
+            />
+            <label className="flex items-center justify-end gap-2 rounded-md border border-vibe-border bg-vibe-bg px-3 py-2">
+              <span className="shrink-0 text-[10px] uppercase tracking-wide text-vibe-dim">
+                Date Range
+              </span>
+              <div className="flex min-w-0 items-center gap-2">
+                <input
+                  type="date"
+                  className="input w-[10.5rem] min-w-0 px-2 py-1.5"
+                  value={startDate}
+                  onChange={(event) => setStartDate(event.target.value)}
+                  aria-label="Date range start"
+                />
+                <span className="text-xs text-vibe-dim">to</span>
+                <input
+                  type="date"
+                  className="input w-[10.5rem] min-w-0 px-2 py-1.5"
+                  value={endDate}
+                  onChange={(event) => setEndDate(event.target.value)}
+                  aria-label="Date range end"
+                />
+              </div>
+            </label>
+          </div>
           <select
             className="select"
             value={sponsorParty}
@@ -563,46 +607,15 @@ export function BillSearch() {
             onChange={(event) => setCommitteeFilter(event.target.value)}
             placeholder="Committee name"
           />
-          <div className="section-shell space-y-2 lg:col-span-2">
-            <p className="text-[10px] text-vibe-dim uppercase tracking-wide">Vibe Overlay</p>
-            <div className="flex flex-wrap gap-3 text-sm">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  checked={includeVibeData === "off"}
-                  onChange={() => setIncludeVibeData("off")}
-                />
-                <span>Off</span>
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  checked={includeVibeData === "placeholder"}
-                  onChange={() => setIncludeVibeData("placeholder")}
-                />
-                <span>Placeholder</span>
-              </label>
-            </div>
-          </div>
           <button onClick={handleSearch} className="btn btn-primary lg:col-span-2">
             Fetch Bills
           </button>
         </div>
         <p className="text-xs text-vibe-dim mt-2">
           Browse the full Congress.gov bill stream with page controls, workflow status filters,
-          sponsor metadata, committee matching, and latest-action search.
+          sponsor metadata, committee matching, full-text bill search, and date filtering.
         </p>
       </div>
-
-      {includeVibeData === "placeholder" && (
-        <div className="section-shell-cosmic">
-          <p className="text-xs text-vibe-cosmic uppercase tracking-wider">Vibe Data Placeholder</p>
-          <p className="text-sm text-vibe-dim mt-2">
-            Reserve space here for Washington weather, lunar phase, astrology, and other daily
-            context overlays once we start blending them into the bill list.
-          </p>
-        </div>
-      )}
 
       {list.loading && <LoadingRows />}
 

@@ -199,10 +199,10 @@ export function MemberSearch() {
           </select>
         </div>
 
-        <div className="mt-4 space-y-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2 xl:gap-4">
           <div>
-            <p className="text-[11px] text-vibe-dim uppercase tracking-wider mb-2">Party</p>
-            <div className="flex flex-wrap gap-2">
+            <p className="mb-1.5 text-[10px] text-vibe-dim uppercase tracking-wider">Party</p>
+            <div className="flex flex-wrap gap-1.5">
               <FilterToggle
                 label="All"
                 active={partyFilter === "all"}
@@ -227,8 +227,8 @@ export function MemberSearch() {
           </div>
 
           <div>
-            <p className="text-[11px] text-vibe-dim uppercase tracking-wider mb-2">Chamber</p>
-            <div className="flex flex-wrap gap-2">
+            <p className="mb-1.5 text-[10px] text-vibe-dim uppercase tracking-wider">Chamber</p>
+            <div className="flex flex-wrap gap-1.5">
               <FilterToggle
                 label="All"
                 active={chamberFilter === "all"}
@@ -266,7 +266,7 @@ export function MemberSearch() {
             {browse.data?.source ? ` · ${browse.data.source.replace(/_/g, " ")}` : ""}
           </p>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
             {filteredMembers.map((m) => (
               <MemberCard
                 key={m.bioguideId}
@@ -307,7 +307,11 @@ function FilterToggle({
     <button
       type="button"
       onClick={onClick}
-      className={`btn ${active ? "btn-primary" : "btn-ghost"}`}
+      className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+        active
+          ? "border-vibe-accent bg-vibe-accent text-white"
+          : "border-transparent text-vibe-dim hover:border-vibe-border hover:bg-vibe-border/60 hover:text-vibe-text"
+      }`}
     >
       {label}
     </button>
@@ -339,30 +343,32 @@ function MemberCard({
     <>
       <button
         onClick={onClick}
-        className={`card text-left hover:border-vibe-accent/50 transition-colors ${
+        className={`card p-3 text-left hover:border-vibe-accent/50 transition-colors ${
           isExpanded ? "border-vibe-accent/50 bg-vibe-surface/80" : ""
         }`}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           {member.depiction?.imageUrl && (
             <img
               src={member.depiction.imageUrl}
               alt=""
-              className="w-10 h-10 rounded-full object-cover bg-vibe-border"
+              className="h-9 w-9 rounded-full object-cover bg-vibe-border"
             />
           )}
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium truncate">{member.name}</p>
-            <div className="flex items-center gap-2 mt-0.5">
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
               <PartyBadge party={member.party} />
-              <span className="badge bg-vibe-border text-vibe-dim">{chamber}</span>
+              <span className="badge bg-vibe-border px-1.5 py-0.5 text-[10px] text-vibe-dim">
+                {chamber}
+              </span>
               <span className="text-xs text-vibe-dim">
                 {member.state}
                 {member.district != null ? `-${member.district}` : ""}
               </span>
             </div>
             {tenureLabel && (
-              <p className="text-[11px] text-vibe-dim mt-1">{tenureLabel}</p>
+              <p className="mt-1 text-[10px] text-vibe-dim">{tenureLabel}</p>
             )}
           </div>
           <span className="text-xs text-vibe-dim shrink-0">
