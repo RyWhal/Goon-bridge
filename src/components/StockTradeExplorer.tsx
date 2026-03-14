@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
+import { resolveMemberImageUrl } from "../lib/congress";
 
 interface MemberRecord {
   bioguide_id?: string;
@@ -255,6 +256,7 @@ export function StockTradeExplorer() {
   }, [tradeMembers.data?.members, query]);
 
   const selectedMember = memberTrades.data?.member ?? null;
+  const selectedMemberImageUrl = resolveMemberImageUrl(selectedMember?.image_url);
 
   const openMember = async (bioguideId: string) => {
     setSelectedBioguideId(bioguideId);
@@ -309,6 +311,7 @@ export function StockTradeExplorer() {
               {foundMembers.map((entry) => {
                 const isActive = selectedBioguideId === entry.bioguideId;
                 const chamber = normalizeChamber(entry.chamber);
+                const portraitUrl = resolveMemberImageUrl(entry.depiction?.imageUrl);
                 return (
                   <button
                     key={entry.bioguideId}
@@ -319,9 +322,9 @@ export function StockTradeExplorer() {
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      {entry.depiction?.imageUrl && (
+                      {portraitUrl && (
                         <img
-                          src={entry.depiction.imageUrl}
+                          src={portraitUrl}
                           alt={entry.name ?? "Member portrait"}
                           className="h-12 w-12 rounded-md object-cover border border-vibe-border"
                         />
@@ -388,10 +391,10 @@ export function StockTradeExplorer() {
             <>
               <div className="card">
                 <div className="flex items-start gap-4">
-                  {selectedMember?.image_url && (
+                  {selectedMemberImageUrl && (
                     <img
-                      src={selectedMember.image_url}
-                      alt={selectedMember.direct_order_name ?? selectedMember.name ?? selectedBioguideId}
+                      src={selectedMemberImageUrl}
+                      alt={selectedMember?.direct_order_name ?? selectedMember?.name ?? selectedBioguideId}
                       className="h-20 w-20 rounded-lg object-cover border border-vibe-border"
                     />
                   )}

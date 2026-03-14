@@ -119,3 +119,20 @@ export function formatMemberDisplayName(member: {
   if (combined) return combined;
   return "Unknown member";
 }
+
+export function resolveMemberImageUrl(value?: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("//")) return `https:${trimmed}`;
+
+  const normalizedPath = trimmed.replace(/^\/+/, "");
+  if (!normalizedPath) return null;
+  if (normalizedPath.startsWith("img/member/")) {
+    return `https://www.congress.gov/${normalizedPath}`;
+  }
+
+  return `https://www.congress.gov/img/member/${normalizedPath}`;
+}
