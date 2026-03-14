@@ -726,6 +726,18 @@ async function fetchMemberDetailSummary(
   }
 }
 
+function buildMemberSummaryColumns(
+  summary: Awaited<ReturnType<typeof fetchMemberDetailSummary>> | null | undefined
+) {
+  return {
+    first_congress: summary?.firstCongress ?? null,
+    last_congress: summary?.lastCongress ?? null,
+    total_terms: summary?.totalTerms ?? null,
+    congresses_served: summary?.congressesServed ?? summary?.totalTerms ?? null,
+    years_served: summary?.yearsServed ?? null,
+  };
+}
+
 async function fetchCongressMembersPage(
   apiKey: string,
   congressNum: string,
@@ -1394,7 +1406,7 @@ congress.get("/members/browse", async (c) => {
         sb
           .from("members")
           .select(
-            "bioguide_id,name,direct_order_name,party,state,district,chamber,image_url,congress"
+            "bioguide_id,name,direct_order_name,party,state,district,chamber,image_url,congress,first_congress,last_congress,total_terms,congresses_served,years_served"
           )
           .eq("congress", currentCongress)
           .order("name", { ascending: true }),
@@ -1411,14 +1423,35 @@ congress.get("/members/browse", async (c) => {
       );
       const rows = membersRes.data ?? [];
       const detailSummaries = new Map<string, Awaited<ReturnType<typeof fetchMemberDetailSummary>>>();
-      if (apiKey && rows.length > 0) {
-        const detailResults = await mapInBatches(rows.map((row) => row.bioguide_id), 10, async (bioguideId) => ({
+      const missingSummaryIds = rows
+        .filter(
+          (row) =>
+            row.first_congress == null ||
+            row.last_congress == null ||
+            row.total_terms == null ||
+            row.congresses_served == null
+        )
+        .map((row) => row.bioguide_id);
+      if (apiKey && missingSummaryIds.length > 0) {
+        const detailResults = await mapInBatches(missingSummaryIds, 8, async (bioguideId) => ({
           bioguideId,
           detail: await fetchMemberDetailSummary(apiKey, bioguideId),
         }));
 
         for (const result of detailResults) {
           detailSummaries.set(result.bioguideId, result.detail);
+        }
+
+        const summaryRows = detailResults
+          .filter((result) => result.detail)
+          .map((result) => ({
+            bioguide_id: result.bioguideId,
+            ...buildMemberSummaryColumns(result.detail),
+          }));
+        if (summaryRows.length > 0) {
+          c.executionCtx.waitUntil(
+            Promise.resolve(sb.from("members").upsert(summaryRows, { onConflict: "bioguide_id" }))
+          );
         }
       }
 
@@ -1431,11 +1464,23 @@ congress.get("/members/browse", async (c) => {
           houseVotes: stats?.house_votes ?? null,
           senateVotes: stats?.senate_votes ?? null,
         });
-        const firstCongress = stats?.first_congress ?? detail?.firstCongress ?? row.congress ?? null;
-        const lastCongress = stats?.last_congress ?? detail?.lastCongress ?? row.congress ?? null;
+        const firstCongress =
+          detail?.firstCongress ??
+          row.first_congress ??
+          stats?.first_congress ??
+          row.congress ??
+          null;
+        const lastCongress =
+          detail?.lastCongress ??
+          row.last_congress ??
+          stats?.last_congress ??
+          row.congress ??
+          null;
         const congressesServed =
           detail?.congressesServed ??
+          row.congresses_served ??
           detail?.totalTerms ??
+          row.total_terms ??
           (firstCongress != null && lastCongress != null
             ? Math.max(1, lastCongress - firstCongress + 1)
             : null);
