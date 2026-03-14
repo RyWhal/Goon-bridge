@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
+import {
+  normalizeUsaSpendingAwardResponse,
+  USA_SPENDING_CONTRACT_CODES,
+  USA_SPENDING_DIRECT_FIELDS,
+  type UsaSpendingAwardSearchResponse,
+} from "../lib/usaspending";
 
 interface ContributionResult {
   contributor_name?: string;
@@ -78,47 +84,6 @@ interface SymbolLookupResponse {
   }>;
 }
 
-interface UsaSpendingResult {
-  symbol: string;
-  recipientName: string | null;
-  recipientParentName: string | null;
-  country: string | null;
-  totalValue: number | null;
-  actionDate: string | null;
-  performanceStartDate: string | null;
-  performanceEndDate: string | null;
-  awardingAgencyName: string | null;
-  awardingSubAgencyName: string | null;
-  awardingOfficeName: string | null;
-  performanceCountry: string | null;
-  performanceCity: string | null;
-  performanceCounty: string | null;
-  performanceState: string | null;
-  performanceZipCode: string | null;
-  performanceCongressionalDistrict: string | null;
-  awardDescription: string | null;
-  naicsCode: string | null;
-  permalink: string | null;
-  awardId?: string | null;
-  awardType?: string | null;
-}
-
-interface UsaSpendingSearchResponse {
-  symbol: string;
-  company?: string | null;
-  from: string;
-  to: string;
-  count: number;
-  summary: {
-    totalValue: number;
-    averageAwardValue: number;
-    agencyCount: number;
-    topAgencyName: string | null;
-    topAgencyValue: number | null;
-  };
-  data: UsaSpendingResult[];
-}
-
 type ContributionCursor = Partial<
   Pick<
     Record<string, string>,
@@ -130,119 +95,6 @@ type ContributionCursor = Partial<
 >;
 
 const DONATION_PAGE_SIZE = 10;
-const USA_SPENDING_DIRECT_FIELDS = [
-  "Award ID",
-  "Recipient Name",
-  "Award Amount",
-  "Base Obligation Date",
-  "Start Date",
-  "End Date",
-  "Awarding Agency",
-  "Awarding Sub Agency",
-  "Contract Award Type",
-  "Description",
-  "pop_city_name",
-  "pop_state_code",
-  "Place of Performance Zip5",
-  "naics_code",
-  "generated_internal_id",
-];
-const USA_SPENDING_CONTRACT_CODES = ["A", "B", "C", "D"];
-
-function asTrimmedString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function asFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value.replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function stripCorporateSuffixes(value: string): string {
-  return value
-    .replace(/\b(inc|incorporated|corp|corporation|company|co|llc|ltd|limited|plc|holdings|holding|group)\b\.?/gi, "")
-    .replace(/[.,]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function buildRecipientSearchTerms(companyName: string, symbol: string): string[] {
-  return [...new Set([companyName, stripCorporateSuffixes(companyName), symbol].filter(Boolean))];
-}
-
-function buildUsaSpendingAwardUrl(generatedInternalId: string | null): string | null {
-  if (!generatedInternalId) return null;
-  return `https://www.usaspending.gov/award/${encodeURIComponent(generatedInternalId)}`;
-}
-
-function normalizeUsaSpendingResponse(
-  symbol: string,
-  company: string,
-  from: string,
-  to: string,
-  raw: { results?: Array<Record<string, unknown>>; page_metadata?: { count?: number } }
-): UsaSpendingSearchResponse {
-  const data = Array.isArray(raw.results) ? raw.results : [];
-  const records = data
-    .map((item) => ({
-      symbol,
-      recipientName: asTrimmedString(item["Recipient Name"]),
-      recipientParentName: null,
-      country: null,
-      totalValue: asFiniteNumber(item["Award Amount"]),
-      actionDate: asTrimmedString(item["Base Obligation Date"]),
-      performanceStartDate: asTrimmedString(item["Start Date"]),
-      performanceEndDate: asTrimmedString(item["End Date"]),
-      awardingAgencyName: asTrimmedString(item["Awarding Agency"]),
-      awardingSubAgencyName: asTrimmedString(item["Awarding Sub Agency"]),
-      awardingOfficeName: null,
-      performanceCountry: null,
-      performanceCity: asTrimmedString(item["pop_city_name"]),
-      performanceCounty: null,
-      performanceState: asTrimmedString(item["pop_state_code"]),
-      performanceZipCode: asTrimmedString(item["Place of Performance Zip5"]),
-      performanceCongressionalDistrict: null,
-      awardDescription: asTrimmedString(item["Description"]),
-      naicsCode: asTrimmedString(item["naics_code"]),
-      permalink: buildUsaSpendingAwardUrl(asTrimmedString(item["generated_internal_id"])),
-      awardId: asTrimmedString(item["Award ID"]),
-      awardType: asTrimmedString(item["Contract Award Type"]),
-    }))
-    .sort((a, b) => {
-      const aTime = a.actionDate ? Date.parse(`${a.actionDate}T00:00:00Z`) : 0;
-      const bTime = b.actionDate ? Date.parse(`${b.actionDate}T00:00:00Z`) : 0;
-      return bTime - aTime;
-    });
-
-  const totalValue = records.reduce((sum, item) => sum + (item.totalValue ?? 0), 0);
-  const agenciesByValue = new Map<string, number>();
-  for (const record of records) {
-    const agency = record.awardingAgencyName ?? "Unknown";
-    agenciesByValue.set(agency, (agenciesByValue.get(agency) ?? 0) + (record.totalValue ?? 0));
-  }
-  const topAgencyEntry = [...agenciesByValue.entries()].sort((a, b) => b[1] - a[1])[0] ?? null;
-
-  return {
-    symbol,
-    company,
-    from,
-    to,
-    count: raw.page_metadata?.count ?? records.length,
-    summary: {
-      totalValue,
-      averageAwardValue: records.length ? totalValue / records.length : 0,
-      agencyCount: agenciesByValue.size,
-      topAgencyName: topAgencyEntry?.[0] ?? null,
-      topAgencyValue: topAgencyEntry?.[1] ?? null,
-    },
-    data: records,
-  };
-}
-
 function formatDateInput(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
@@ -296,61 +148,67 @@ export function CorporationSearch() {
   const donations = useApi<ContributionSearchResponse>();
   const symbolLookup = useApi<SymbolLookupResponse>();
   const lobbying = useApi<LobbyingSearchResponse>();
-  const spending = useApi<UsaSpendingSearchResponse>();
+  const spending = useApi<UsaSpendingAwardSearchResponse>();
 
   const normalizedSearchInput = searchInput.trim();
 
-  const fetchSpendingData = async (symbol: string, companyName: string, fromDate: string, toDate: string) => {
+  const fetchSpendingData = async (
+    symbol: string,
+    companyName: string,
+    fromDate: string,
+    toDate: string
+  ) => {
     const spendingParams = new URLSearchParams({
       symbol,
       company: companyName,
       from: fromDate,
       to: toDate,
     });
-
     const proxied = await spending.fetchData(`/api/usaspending/awards?${spendingParams.toString()}`);
     if (proxied) return;
 
-    const recipientSearchText = buildRecipientSearchTerms(companyName, symbol);
-    let lastError = spending.error ?? "Failed to fetch from USAspending API";
+    try {
+      const resp = await fetch("https://api.usaspending.gov/api/v2/search/spending_by_award/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filters: {
+            recipient_search_text: [companyName],
+            time_period: [{ start_date: fromDate, end_date: toDate }],
+            award_type_codes: USA_SPENDING_CONTRACT_CODES,
+          },
+          fields: USA_SPENDING_DIRECT_FIELDS,
+          page: 1,
+          limit: 100,
+          sort: "Base Obligation Date",
+          order: "desc",
+        }),
+      });
 
-    for (const term of recipientSearchText) {
-      try {
-        const resp = await fetch("https://api.usaspending.gov/api/v2/search/spending_by_award/", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filters: {
-              recipient_search_text: [term],
-              time_period: [{ start_date: fromDate, end_date: toDate }],
-              award_type_codes: USA_SPENDING_CONTRACT_CODES,
-            },
-            fields: USA_SPENDING_DIRECT_FIELDS,
-            page: 1,
-            limit: 100,
-            sort: "Base Obligation Date",
-            order: "desc",
-          }),
-        });
-
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          lastError = text || `USAspending direct request failed (${resp.status})`;
-          continue;
-        }
-
-        const raw = (await resp.json()) as {
-          results?: Array<Record<string, unknown>>;
-          page_metadata?: { count?: number };
-        };
-        spending.setData(normalizeUsaSpendingResponse(symbol, companyName, fromDate, toDate, raw));
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        spending.setError(text || `USAspending direct request failed (${resp.status})`);
         return;
-      } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
       }
-    }
 
-    spending.setError(lastError);
+      const raw = (await resp.json()) as {
+        results?: Array<Record<string, unknown>>;
+        page_metadata?: { count?: number };
+      };
+
+      spending.setData(
+        normalizeUsaSpendingAwardResponse(
+          symbol,
+          companyName,
+          fromDate,
+          toDate,
+          companyName,
+          raw
+        )
+      );
+    } catch (error) {
+      spending.setError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const fetchDonationsPage = (page: number) => {
@@ -440,7 +298,11 @@ export function CorporationSearch() {
     return total / donationResults.length;
   }, [donationResults]);
 
-  const loading = symbolLookup.loading || donations.loading || lobbying.loading || spending.loading;
+  const loading =
+    symbolLookup.loading ||
+    donations.loading ||
+    lobbying.loading ||
+    spending.loading;
   const hasDonationResponse = donations.loading || !!donations.error || !!donations.data;
   const hasLobbyingResponse = lobbying.loading || !!lobbying.error || !!lobbying.data;
   const hasSpendingResponse = spending.loading || !!spending.error || !!spending.data;
@@ -798,6 +660,21 @@ export function CorporationSearch() {
                       <SummaryStat
                         label="Top agency"
                         value={spending.data.summary.topAgencyName ?? "N/A"}
+                      />
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      <SummaryStat
+                        label="Search mode"
+                        value="Name search"
+                      />
+                      <SummaryStat
+                        label="Recipient"
+                        value={spending.data.recipient.recipientName ?? resolvedCompanyName ?? "N/A"}
+                      />
+                      <SummaryStat
+                        label="Recipient ID"
+                        value={spending.data.recipient.recipientId ?? "N/A"}
                       />
                     </div>
 
