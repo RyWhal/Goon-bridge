@@ -23,6 +23,42 @@ async function congressFetch(
   return fetch(url.toString());
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function congressFetchWithRetry(
+  path: string,
+  apiKey: string,
+  params?: Record<string, string>,
+  attempts = 3
+): Promise<Response> {
+  let lastResponse: Response | null = null;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await congressFetch(path, apiKey, params);
+      lastResponse = response;
+      if (
+        response.ok ||
+        ![408, 429, 500, 502, 503, 504].includes(response.status) ||
+        attempt === attempts - 1
+      ) {
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1) break;
+    }
+
+    await sleep(250 * (attempt + 1));
+  }
+
+  if (lastResponse) return lastResponse;
+  throw lastError instanceof Error ? lastError : new Error("Congress API request failed");
+}
+
 /**
  * Check if Supabase is configured. Gracefully degrade if not.
  */
@@ -705,7 +741,7 @@ async function fetchMemberDetailSummary(
   yearsServed?: number | null;
 } | null> {
   try {
-    const resp = await congressFetch(`/member/${bioguideId}`, apiKey);
+    const resp = await congressFetchWithRetry(`/member/${bioguideId}`, apiKey);
     if (!resp.ok) return null;
 
     const data = (await resp.json()) as CongressMemberDetailResponse;
