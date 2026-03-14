@@ -11,6 +11,7 @@ import { earthquakes } from "./apis/earthquakes";
 import { sunrise } from "./apis/sunrise";
 import { lunar } from "./apis/lunar";
 import { correlation } from "./apis/correlation";
+import { disclosures } from "./apis/disclosures";
 import { getSupabase } from "./lib/supabase";
 
 const app = new Hono<Env>();
@@ -83,6 +84,7 @@ app.route("/api/earthquakes", earthquakes);
 app.route("/api/sunrise", sunrise);
 app.route("/api/lunar", lunar);
 app.route("/api/correlation", correlation);
+app.route("/api/disclosures", disclosures);
 
 // ── Vote context (aggregated) ────────────────────────────────────────────────
 // Returns all correlation data for a given date in a single response
