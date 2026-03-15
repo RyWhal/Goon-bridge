@@ -762,18 +762,6 @@ async function fetchMemberDetailSummary(
   }
 }
 
-function buildMemberSummaryColumns(
-  summary: Awaited<ReturnType<typeof fetchMemberDetailSummary>> | null | undefined
-) {
-  return {
-    first_congress: summary?.firstCongress ?? null,
-    last_congress: summary?.lastCongress ?? null,
-    total_terms: summary?.totalTerms ?? null,
-    congresses_served: summary?.congressesServed ?? summary?.totalTerms ?? null,
-    years_served: summary?.yearsServed ?? null,
-  };
-}
-
 async function fetchCongressMembersPage(
   apiKey: string,
   congressNum: string,
@@ -868,7 +856,6 @@ type CachedBillRow = Record<string, unknown>;
 
 const BILL_SCAN_PAGE_SIZE = 250;
 const BILL_SCAN_MAX_OFFSET = 20000;
-const BILL_ACTIVITY_SORT_MIN_WINDOW = 1000;
 const BILL_METADATA_FETCH_BUDGET = 20;
 
 function normalizeText(value: string | undefined | null): string {
@@ -1464,36 +1451,10 @@ congress.get("/members/browse", async (c) => {
         (statsRes.data ?? []).map((row) => [row.bioguide_id, row])
       );
       const rows = membersRes.data ?? [];
-      const missingSummaryIds = rows
-        .filter(
-          (row) =>
-            row.first_congress == null ||
-            row.last_congress == null ||
-            row.total_terms == null ||
-            row.congresses_served == null
-        )
-        .map((row) => row.bioguide_id);
-      if (apiKey && missingSummaryIds.length > 0) {
-        // Warm missing summary fields in the background instead of blocking the browse response.
-        c.executionCtx.waitUntil((async () => {
-          const detailResults = await mapInBatches(missingSummaryIds, 8, async (bioguideId) => ({
-            bioguideId,
-            detail: await fetchMemberDetailSummary(apiKey, bioguideId),
-          }));
 
-          const summaryRows = detailResults
-            .filter((result) => result.detail)
-            .map((result) => ({
-              bioguide_id: result.bioguideId,
-              ...buildMemberSummaryColumns(result.detail),
-            }));
-
-          if (summaryRows.length > 0) {
-            await sb.from("members").upsert(summaryRows, { onConflict: "bioguide_id" });
-          }
-        })());
-      }
-
+      // Members browse must stay cache-only in production. It is a small, mostly static
+      // dataset, and adding per-member Congress.gov hydration here has repeatedly pushed
+      // the deployed Worker beyond the Pages proxy timeout.
       const members = rows.map((row) => {
         const stats = statsById.get(row.bioguide_id);
         const chamber = inferMemberChamber({
@@ -2313,20 +2274,21 @@ congress.get("/bills", async (c) => {
   const sponsor = c.req.query("sponsor")?.trim() ?? "";
   const committee = c.req.query("committee")?.trim() ?? "";
 
-  // "Newest activity" sorts are correctness-sensitive and have regressed repeatedly when
-  // routed through shortcut paths. Keep them on the local scan path so page order matches
-  // the visible bottom-left action date on each bill card.
-  const requiresActivityWindowSort = sort.startsWith("updateDate");
   const hasSummaryFilters = Boolean(status || search || startDate || endDate);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
-  const requiresScan = hasSummaryFilters || hasMetadataFilters || requiresActivityWindowSort;
+  const requiresScan = hasSummaryFilters || hasMetadataFilters;
 
   try {
     if (!requiresScan) {
       if (hasSupabase(c.env)) {
         try {
           const sb = getSupabase(c.env);
-          const sortColumn = sort.startsWith("introducedDate") ? "introduced_date" : "update_date";
+          // Default bill browse must be cache-first in production. The list cards already
+          // render the minimal fields we persist in Supabase, and "Newest activity" must
+          // sort by the visible bottom-left action date (`latest_action_date`).
+          const sortColumn = sort.startsWith("introducedDate")
+            ? "introduced_date"
+            : "latest_action_date";
           const ascending = sort.endsWith("+asc");
           let cacheQuery = sb
             .from("bills")
@@ -2394,36 +2356,8 @@ congress.get("/bills", async (c) => {
         }
       }
 
-      const windowSize = Math.max(offset + limit, BILL_ACTIVITY_SORT_MIN_WINDOW);
-      const pages = requiresActivityWindowSort
-        ? await (async () => {
-            const collected: CongressBillLike[] = [];
-            let totalCount: number | undefined;
-
-            for (let pageOffset = 0; collected.length < windowSize; pageOffset += BILL_SCAN_PAGE_SIZE) {
-              const pageData = await fetchCongressBillsPage(
-                apiKey,
-                congress_num,
-                billType,
-                BILL_SCAN_PAGE_SIZE,
-                pageOffset,
-                sort
-              );
-              if (totalCount == null) totalCount = pageData.pagination?.count;
-
-              const pageBills = pageData.bills ?? [];
-              if (pageBills.length === 0) break;
-
-              collected.push(...pageBills);
-              if (!pageData.pagination?.next || pageBills.length < BILL_SCAN_PAGE_SIZE) break;
-            }
-
-            return { bills: collected, totalCount };
-          })()
-        : await (async () => {
-            const data = await fetchCongressBillsPage(apiKey, congress_num, billType, limit, offset, sort);
-            return { bills: data.bills ?? [], totalCount: data.pagination?.count };
-          })();
+      const data = await fetchCongressBillsPage(apiKey, congress_num, billType, limit, offset, sort);
+      const pages = { bills: data.bills ?? [], totalCount: data.pagination?.count };
 
       const cachedBills = await loadCachedBills(c.env, congress_num, pages.bills);
       const normalizedWindow = pages.bills.map((bill) => {
@@ -2431,9 +2365,7 @@ congress.get("/bills", async (c) => {
         return normalizeBillForList(bill, identity ? cachedBills.get(identity.key) : undefined);
       }).sort((left, right) => compareNormalizedBills(left, right, sort));
 
-      const normalizedBills = requiresActivityWindowSort
-        ? normalizedWindow.slice(offset, offset + limit)
-        : normalizedWindow;
+      const normalizedBills = normalizedWindow;
 
       const cacheRows = pages.bills
         .map((bill) => toBillCacheRow(bill))
