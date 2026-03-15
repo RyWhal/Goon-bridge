@@ -531,17 +531,31 @@ function MemberDetailCard({
         </div>
       </div>
 
+      {/* Office */}
+      {member.addressInformation && (
+        <SectionPanel className="text-xs text-vibe-dim">
+          {member.addressInformation.officeAddress && (
+            <p>{member.addressInformation.officeAddress}</p>
+          )}
+          {member.addressInformation.phoneNumber && (
+            <p>Phone: {member.addressInformation.phoneNumber}</p>
+          )}
+        </SectionPanel>
+      )}
+
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-        <StatBox label="Total Terms" value={terms.length > 0 ? String(terms.length) : "—"} />
-        <StatBox label="Senate Terms" value={String(senatTerms.length)} />
-        <StatBox label="House Terms" value={String(houseTerms.length)} />
-        <StatBox label="Yrs in Congress" value={yearsServed != null ? `~${yearsServed}` : "—"} />
-      </div>
+      <SectionPanel>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <StatBox label="Total Terms" value={terms.length > 0 ? String(terms.length) : "—"} />
+          <StatBox label="Senate Terms" value={String(senatTerms.length)} />
+          <StatBox label="House Terms" value={String(houseTerms.length)} />
+          <StatBox label="Yrs in Congress" value={yearsServed != null ? `~${yearsServed}` : "—"} />
+        </div>
+      </SectionPanel>
 
       {/* Term history */}
       {terms.length > 0 && (
-        <div className="mb-4">
+        <SectionPanel>
           <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
             Term History
           </p>
@@ -572,12 +586,12 @@ function MemberDetailCard({
               </div>
             ))}
           </div>
-        </div>
+        </SectionPanel>
       )}
 
       {/* Leadership */}
       {member.leadership && member.leadership.length > 0 && (
-        <div className="mb-4">
+        <SectionPanel>
           <p className="text-xs text-vibe-dim uppercase tracking-wider mb-2">
             Leadership Roles
           </p>
@@ -588,22 +602,10 @@ function MemberDetailCard({
               </span>
             ))}
           </div>
-        </div>
+        </SectionPanel>
       )}
 
-      {/* Office */}
-      {member.addressInformation && (
-        <div className="mb-4 text-xs text-vibe-dim">
-          {member.addressInformation.officeAddress && (
-            <p>{member.addressInformation.officeAddress}</p>
-          )}
-          {member.addressInformation.phoneNumber && (
-            <p>Phone: {member.addressInformation.phoneNumber}</p>
-          )}
-        </div>
-      )}
-
-      <div className="mb-4">
+      <SectionPanel>
         <div className="flex items-center justify-between gap-3 mb-2">
           <p className="text-xs text-vibe-dim uppercase tracking-wider">
             Recent Voting Record
@@ -689,9 +691,25 @@ function MemberDetailCard({
             No recent voting history was returned for this member.
           </p>
         )}
-      </div>
+      </SectionPanel>
 
       <JsonViewer data={{ member }} label="Full API Response" />
+    </div>
+  );
+}
+
+function SectionPanel({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`mb-4 rounded-xl border-2 border-vibe-border bg-vibe-bg/60 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.35)] ${className}`}
+    >
+      {children}
     </div>
   );
 }
