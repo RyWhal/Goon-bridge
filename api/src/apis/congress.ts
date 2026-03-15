@@ -720,6 +720,24 @@ function summarizeMemberTerms(
   return { chamber, firstCongress, lastCongress, totalTerms, congressesServed, yearsServed };
 }
 
+function deriveCongressesServed(options: {
+  congressesServed?: number | null;
+  totalTerms?: number | null;
+  firstCongress?: number | null;
+  lastCongress?: number | null;
+}) {
+  const candidates = [
+    options.congressesServed,
+    options.totalTerms,
+    options.firstCongress != null && options.lastCongress != null
+      ? Math.max(1, options.lastCongress - options.firstCongress + 1)
+      : null,
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+
+  if (candidates.length === 0) return null;
+  return Math.max(...candidates);
+}
+
 function normalizeChamberLabel(chamber?: string | null): string | null {
   const value = (chamber ?? "").trim().toLowerCase();
   if (!value) return null;
@@ -1473,12 +1491,12 @@ congress.get("/members/browse", async (c) => {
           stats?.last_congress ??
           row.congress ??
           null;
-        const congressesServed =
-          row.congresses_served ??
-          row.total_terms ??
-          (firstCongress != null && lastCongress != null
-            ? Math.max(1, lastCongress - firstCongress + 1)
-            : null);
+        const congressesServed = deriveCongressesServed({
+          congressesServed: row.congresses_served,
+          totalTerms: row.total_terms,
+          firstCongress,
+          lastCongress,
+        });
 
         return {
           bioguideId: row.bioguide_id,
@@ -1584,6 +1602,38 @@ congress.get("/members/:bioguideId", async (c) => {
 
     if (data.member) {
       data.member.party = extractMemberParty(data.member) ?? undefined;
+
+      if (hasSupabase(c.env)) {
+        const summary = summarizeMemberTerms(data.member.terms);
+        const sb = getSupabase(c.env);
+        const directOrderName =
+          typeof data.member.directOrderName === "string" ? data.member.directOrderName : null;
+        const chamber = normalizeChamberLabel(summary.chamber);
+        const congressesServed = deriveCongressesServed({
+          congressesServed: summary.congressesServed,
+          totalTerms: summary.totalTerms,
+          firstCongress: summary.firstCongress,
+          lastCongress: summary.lastCongress,
+        });
+
+        c.executionCtx.waitUntil(
+          Promise.resolve(
+            sb
+              .from("members")
+              .update({
+                direct_order_name: directOrderName,
+                chamber,
+                first_congress: summary.firstCongress,
+                last_congress: summary.lastCongress,
+                total_terms: summary.totalTerms,
+                congresses_served: congressesServed,
+                years_served: summary.yearsServed,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("bioguide_id", bioguideId)
+          )
+        );
+      }
     }
 
     return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
