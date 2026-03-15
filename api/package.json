@@ -3,11 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "predev": "node ./scripts/write_build_info.mjs",
     "dev": "wrangler dev",
-    "predeploy": "node ./scripts/write_build_info.mjs",
     "deploy": "wrangler deploy",
-    "prebuild": "node ./scripts/write_build_info.mjs",
     "build": "tsc --noEmit",
     "disclosures:house": "node scripts/house_disclosures.mjs",
     "disclosures:house:batch": "node scripts/house_disclosures_backfill.mjs",

@@ -7,5 +7,10 @@ export type Env = {
     SUPABASE_SERVICE_KEY: string;
     ALLOWED_ORIGINS: string; // comma-separated list, e.g. "https://congressional-vibes.rjpw.space"
     ENVIRONMENT: string;     // "production" | "staging" | "development"
+    CF_VERSION_METADATA?: {
+      id: string;
+      tag?: string;
+      timestamp: string;
+    };
   };
 };

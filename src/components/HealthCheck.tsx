@@ -8,8 +8,9 @@ interface HealthResponse {
   version?: {
     version: string;
     commit: string;
-    deployed_at: string;
+    deployed_at: string | null;
     version_id: string;
+    version_tag?: string | null;
   };
 }
 
@@ -40,14 +41,20 @@ export function HealthCheck() {
     const apiCount = Object.values(data.apis).filter((value) => value === true).length;
     const total = Object.values(data.apis).length;
     const versionLabel = data.version
-      ? `${data.version.version}+${data.version.commit.slice(0, 7)}`
+      ? `${data.version.version}+${(data.version.version_tag ?? data.version.version_id).slice(0, 7)}`
       : null;
     return (
       <span
         className="text-xs text-vibe-yea"
         title={[
           data.version
-            ? `version: ${data.version.version_id}\ndeployed: ${data.version.deployed_at}`
+            ? [
+                `version: ${data.version.version_id}`,
+                data.version.version_tag ? `tag: ${data.version.version_tag}` : null,
+                data.version.deployed_at ? `deployed: ${data.version.deployed_at}` : null,
+              ]
+                .filter(Boolean)
+                .join("\n")
             : null,
           ...Object.entries(data.apis).map(([k, v]) => `${k}: ${typeof v === "string" ? v : v ? "ready" : "no key"}`),
         ]
