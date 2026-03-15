@@ -762,18 +762,6 @@ async function fetchMemberDetailSummary(
   }
 }
 
-function buildMemberSummaryColumns(
-  summary: Awaited<ReturnType<typeof fetchMemberDetailSummary>> | null | undefined
-) {
-  return {
-    first_congress: summary?.firstCongress ?? null,
-    last_congress: summary?.lastCongress ?? null,
-    total_terms: summary?.totalTerms ?? null,
-    congresses_served: summary?.congressesServed ?? summary?.totalTerms ?? null,
-    years_served: summary?.yearsServed ?? null,
-  };
-}
-
 async function fetchCongressMembersPage(
   apiKey: string,
   congressNum: string,
@@ -1164,6 +1152,11 @@ function getBillSortDateValue(
     return bill.introducedDate ?? bill.latestAction?.actionDate ?? bill.updateDate ?? "";
   }
 
+  // "Newest activity" must follow the exact date rendered on the card's bottom-left
+  // action line. That visible date comes from latestAction.actionDate, not updateDate.
+  // Regressions here caused the default bills view to look out of order even when the
+  // date-filtered scan path was correct, so keep latestAction.actionDate as the primary
+  // sort key for updateDate-based sorts.
   return bill.latestAction?.actionDate ?? bill.updateDate ?? bill.introducedDate ?? "";
 }
 
@@ -1458,64 +1451,30 @@ congress.get("/members/browse", async (c) => {
         (statsRes.data ?? []).map((row) => [row.bioguide_id, row])
       );
       const rows = membersRes.data ?? [];
-      const detailSummaries = new Map<string, Awaited<ReturnType<typeof fetchMemberDetailSummary>>>();
-      const missingSummaryIds = rows
-        .filter(
-          (row) =>
-            row.first_congress == null ||
-            row.last_congress == null ||
-            row.total_terms == null ||
-            row.congresses_served == null
-        )
-        .map((row) => row.bioguide_id);
-      if (apiKey && missingSummaryIds.length > 0) {
-        const detailResults = await mapInBatches(missingSummaryIds, 8, async (bioguideId) => ({
-          bioguideId,
-          detail: await fetchMemberDetailSummary(apiKey, bioguideId),
-        }));
 
-        for (const result of detailResults) {
-          detailSummaries.set(result.bioguideId, result.detail);
-        }
-
-        const summaryRows = detailResults
-          .filter((result) => result.detail)
-          .map((result) => ({
-            bioguide_id: result.bioguideId,
-            ...buildMemberSummaryColumns(result.detail),
-          }));
-        if (summaryRows.length > 0) {
-          c.executionCtx.waitUntil(
-            Promise.resolve(sb.from("members").upsert(summaryRows, { onConflict: "bioguide_id" }))
-          );
-        }
-      }
-
+      // Members browse must stay cache-only in production. It is a small, mostly static
+      // dataset, and adding per-member Congress.gov hydration here has repeatedly pushed
+      // the deployed Worker beyond the Pages proxy timeout.
       const members = rows.map((row) => {
         const stats = statsById.get(row.bioguide_id);
-        const detail = detailSummaries.get(row.bioguide_id);
         const chamber = inferMemberChamber({
-          chamber: normalizeChamberLabel(row.chamber) ?? detail?.chamber ?? row.chamber,
+          chamber: normalizeChamberLabel(row.chamber) ?? row.chamber,
           district: row.district,
           houseVotes: stats?.house_votes ?? null,
           senateVotes: stats?.senate_votes ?? null,
         });
         const firstCongress =
-          detail?.firstCongress ??
           row.first_congress ??
           stats?.first_congress ??
           row.congress ??
           null;
         const lastCongress =
-          detail?.lastCongress ??
           row.last_congress ??
           stats?.last_congress ??
           row.congress ??
           null;
         const congressesServed =
-          detail?.congressesServed ??
           row.congresses_served ??
-          detail?.totalTerms ??
           row.total_terms ??
           (firstCongress != null && lastCongress != null
             ? Math.max(1, lastCongress - firstCongress + 1)
@@ -1524,7 +1483,7 @@ congress.get("/members/browse", async (c) => {
         return {
           bioguideId: row.bioguide_id,
           name: row.name,
-          directOrderName: detail?.directOrderName ?? row.direct_order_name,
+          directOrderName: row.direct_order_name,
           party: row.party,
           state: row.state,
           district: row.district,
@@ -2315,21 +2274,100 @@ congress.get("/bills", async (c) => {
   const sponsor = c.req.query("sponsor")?.trim() ?? "";
   const committee = c.req.query("committee")?.trim() ?? "";
 
-  const requiresLocalActivitySort = sort.startsWith("updateDate");
   const hasSummaryFilters = Boolean(status || search || startDate || endDate);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
-  const requiresScan = hasSummaryFilters || hasMetadataFilters || requiresLocalActivitySort;
+  const requiresScan = hasSummaryFilters || hasMetadataFilters;
 
   try {
     if (!requiresScan) {
+      if (hasSupabase(c.env)) {
+        try {
+          const sb = getSupabase(c.env);
+          // Default bill browse must be cache-first in production. The list cards already
+          // render the minimal fields we persist in Supabase, and "Newest activity" must
+          // sort by the visible bottom-left action date (`latest_action_date`).
+          const sortColumn = sort.startsWith("introducedDate")
+            ? "introduced_date"
+            : "latest_action_date";
+          const ascending = sort.endsWith("+asc");
+          let cacheQuery = sb
+            .from("bills")
+            .select(
+              "congress,bill_type,bill_number,title,policy_area,latest_action_text,latest_action_date,origin_chamber,update_date,introduced_date,sponsor_bioguide_id,sponsor_name,sponsor_party,sponsor_state,committee_names,bill_status,bill_status_label,bill_status_step",
+              { count: "exact" }
+            )
+            .eq("congress", parseInt(congress_num, 10))
+            .order(sortColumn, { ascending, nullsFirst: false })
+            .order("bill_number", { ascending: true })
+            .range(offset, offset + limit - 1);
+
+          if (billType) {
+            cacheQuery = cacheQuery.eq("bill_type", billType);
+          }
+
+          const { data, count, error } = await cacheQuery;
+          if (!error && data && data.length > 0) {
+            const normalizedBills = data.map((row) =>
+              normalizeBillForList(
+                {
+                  congress: asNumber(row.congress) ?? undefined,
+                  type: typeof row.bill_type === "string" ? row.bill_type : undefined,
+                  number: asNumber(row.bill_number) ?? undefined,
+                  title: typeof row.title === "string" ? row.title : undefined,
+                  originChamber:
+                    typeof row.origin_chamber === "string" ? row.origin_chamber : undefined,
+                  updateDate: typeof row.update_date === "string" ? row.update_date : undefined,
+                  introducedDate:
+                    typeof row.introduced_date === "string" ? row.introduced_date : undefined,
+                  latestAction: {
+                    text:
+                      typeof row.latest_action_text === "string"
+                        ? row.latest_action_text
+                        : undefined,
+                    actionDate:
+                      typeof row.latest_action_date === "string"
+                        ? row.latest_action_date
+                        : undefined,
+                  },
+                  policyArea:
+                    typeof row.policy_area === "string" ? { name: row.policy_area } : undefined,
+                },
+                row as CachedBillRow
+              )
+            );
+
+            return c.json(
+              {
+                bills: normalizedBills,
+                count: count ?? normalizedBills.length,
+                pagination: {
+                  offset,
+                  limit,
+                  count: count ?? normalizedBills.length,
+                  hasMore: count != null ? offset + limit < count : normalizedBills.length === limit,
+                },
+              },
+              200,
+              { "Cache-Control": "public, max-age=900" }
+            );
+          }
+        } catch {
+          // Fall through to live fetch.
+        }
+      }
+
       const data = await fetchCongressBillsPage(apiKey, congress_num, billType, limit, offset, sort);
-      const cachedBills = await loadCachedBills(c.env, congress_num, data.bills ?? []);
-      const normalizedBills = (data.bills ?? []).map((bill) => {
+      const pages = { bills: data.bills ?? [], totalCount: data.pagination?.count };
+
+      const cachedBills = await loadCachedBills(c.env, congress_num, pages.bills);
+      const normalizedWindow = pages.bills.map((bill) => {
         const identity = getBillIdentity(bill);
         return normalizeBillForList(bill, identity ? cachedBills.get(identity.key) : undefined);
       }).sort((left, right) => compareNormalizedBills(left, right, sort));
 
-      const cacheRows = (data.bills ?? [])
+      const normalizedBills = normalizedWindow;
+
+      const cacheRows = pages.bills
         .map((bill) => toBillCacheRow(bill))
         .filter(Boolean) as Array<Record<string, unknown>>;
       if (cacheRows.length > 0) {
@@ -2339,12 +2377,15 @@ congress.get("/bills", async (c) => {
       return c.json(
         {
           bills: normalizedBills,
-          count: data.pagination?.count,
+          count: pages.totalCount,
           pagination: {
             offset,
             limit,
-            count: data.pagination?.count,
-            hasMore: Boolean(data.pagination?.next) || normalizedBills.length === limit,
+            count: pages.totalCount,
+            hasMore:
+              pages.totalCount != null
+                ? offset + limit < pages.totalCount
+                : normalizedBills.length === limit,
           },
         },
         200,

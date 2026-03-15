@@ -1,8 +1,8 @@
 /**
  * Cloudflare Pages Function – catch-all proxy for /api/*
  *
- * Forwards every request under /api/ to the Worker at
- * vibe-api.ryanjpwhalen.workers.dev, preserving path and query string.
+ * Forwards every request under /api/ to the configured Worker origin,
+ * preserving path and query string.
  *
  * IMPORTANT: Cloudflare's CDN replaces the body of any 502/503/504
  * response with its own HTML error page. To ensure the frontend always
@@ -26,9 +26,12 @@ const UPSTREAM_TIMEOUT_MS = 20_000;
 
 export const onRequest: PagesFunction = async (context) => {
   const url = new URL(context.request.url);
+  const upstreamOrigin =
+    (typeof context.env?.API_ORIGIN === "string" && context.env.API_ORIGIN.trim()) ||
+    "https://vibe-api.ryanjpwhalen.workers.dev";
   const target = new URL(
     `${url.pathname}${url.search}`,
-    "https://vibe-api.ryanjpwhalen.workers.dev"
+    upstreamOrigin
   );
 
   const headers = new Headers(context.request.headers);

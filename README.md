@@ -61,12 +61,19 @@ OPENFEC_API_KEY=your_key_here
 npm run build      # outputs to dist/
 ```
 
+For Cloudflare Pages preview/test deploys, set the `API_ORIGIN` Pages environment variable if
+the preview should talk to a non-production Worker. Otherwise the Pages Function proxy will use
+the production Worker origin.
+
 ### API (Cloudflare Worker)
 
 ```bash
 cd api
 npm run deploy
 ```
+
+Pages preview deploys do not automatically deploy the Worker. If frontend/API behavior must match
+the branch under test, deploy the Worker changes too and point `API_ORIGIN` at that Worker.
 
 ## Project Structure
 

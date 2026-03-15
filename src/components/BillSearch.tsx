@@ -373,6 +373,34 @@ function formatSponsorLabel(sponsor?: BillItem["sponsor"]) {
   return meta ? `${sponsor.fullName} (${meta})` : sponsor.fullName;
 }
 
+function getBillSortValue(bill: BillItem, sort: string) {
+  if (sort.startsWith("introducedDate")) {
+    return bill.introducedDate ?? bill.latestAction?.actionDate ?? bill.updateDate ?? "";
+  }
+
+  // Keep UI rendering aligned with the API and the visible card text: "Newest activity"
+  // is sorted by the bottom-left action date shown to the user, which comes from
+  // latestAction.actionDate. Do not switch this to updateDate unless the rendered date
+  // on the bill cards changes too.
+  return bill.latestAction?.actionDate ?? bill.updateDate ?? bill.introducedDate ?? "";
+}
+
+function sortBillsForDisplay(bills: BillItem[], sort: string) {
+  const ascending = sort.endsWith("+asc");
+
+  return [...bills].sort((left, right) => {
+    const leftDate = getBillSortValue(left, sort);
+    const rightDate = getBillSortValue(right, sort);
+    const dateComparison = ascending
+      ? leftDate.localeCompare(rightDate)
+      : rightDate.localeCompare(leftDate);
+
+    if (dateComparison !== 0) return dateComparison;
+
+    return formatBillLabel(left).localeCompare(formatBillLabel(right));
+  });
+}
+
 function BillProgressStepper({ bill }: { bill: BillItem }) {
   const labels = getProgressLabels(bill.originChamber);
   const activeStep = bill.status?.step ?? 0;
@@ -483,7 +511,11 @@ export function BillSearch() {
 
   const totalCount = list.data?.pagination?.count ?? list.data?.count;
   const pageSize = Number.parseInt(submittedFilters.limit, 10);
-  const currentCount = list.data?.bills?.length ?? 0;
+  const displayedBills = useMemo(
+    () => sortBillsForDisplay(list.data?.bills ?? [], submittedFilters.sortBy),
+    [list.data?.bills, submittedFilters.sortBy]
+  );
+  const currentCount = displayedBills.length;
   const pageStart = currentCount > 0 ? offset + 1 : 0;
   const pageEnd = offset + currentCount;
   const currentPage = Math.floor(offset / pageSize) + 1;
@@ -654,7 +686,7 @@ export function BillSearch() {
 
       {list.data?.bills && (
         <div className="space-y-2">
-          {list.data.bills.map((bill, index) => {
+          {displayedBills.map((bill, index) => {
             const billKey = getBillListKey(bill, index);
             const isExpanded = expandedBillKey === billKey;
             const resolved = resolveBillReference(bill) ?? parseBillUrl(bill.url);
