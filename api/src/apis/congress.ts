@@ -1746,6 +1746,73 @@ async function fetchCongressBillsPage(
   return (await resp.json()) as CongressBillsResponse;
 }
 
+async function seedFilteredBillsFromCongress(
+  env: Env["Bindings"],
+  apiKey: string,
+  congressNum: string,
+  billType: string | null,
+  sort: string,
+  status: string | null,
+  search: string | null,
+  startDate: string | null,
+  endDate: string | null,
+  sponsorParty: string | null,
+  limit: number,
+  offset: number
+) {
+  const BILL_SEED_PAGE_SIZE = 250;
+  const BILL_SEED_MAX_PAGES = 4;
+  const matchedBills: Array<ReturnType<typeof normalizeBillForList>> = [];
+  const cacheRows: Array<Record<string, unknown>> = [];
+  let scanned = 0;
+
+  for (let pageIndex = 0; pageIndex < BILL_SEED_MAX_PAGES; pageIndex += 1) {
+    const pageOffset = pageIndex * BILL_SEED_PAGE_SIZE;
+    const data = await fetchCongressBillsPage(
+      apiKey,
+      congressNum,
+      billType,
+      BILL_SEED_PAGE_SIZE,
+      pageOffset,
+      sort
+    );
+    const pageBills = data.bills ?? [];
+    if (pageBills.length === 0) break;
+    scanned += pageBills.length;
+
+    const normalizedPage = pageBills.map((bill) => normalizeBillForList(bill));
+    for (const bill of normalizedPage) {
+      if (
+        billMatchesSummaryFilters(bill, status, search, startDate, endDate) &&
+        billMatchesMetadataFilters(bill, sponsorParty, null, null)
+      ) {
+        matchedBills.push(bill);
+      }
+    }
+
+    cacheRows.push(
+      ...(pageBills
+        .map((bill) => toBillCacheRow(bill))
+        .filter(Boolean) as Array<Record<string, unknown>>)
+    );
+
+    if (!data.pagination?.next || pageBills.length < BILL_SEED_PAGE_SIZE) break;
+    if (matchedBills.length >= offset + limit) break;
+  }
+
+  if (cacheRows.length > 0) {
+    await upsertCachedBills(env, cacheRows);
+  }
+
+  matchedBills.sort((left, right) => compareNormalizedBills(left, right, sort));
+  return {
+    bills: matchedBills.slice(offset, offset + limit),
+    matchedCount: matchedBills.length,
+    scanned,
+    partial: true,
+  };
+}
+
 async function fetchCongressBillDetail(
   apiKey: string,
   congressNum: number,
@@ -2903,6 +2970,43 @@ congress.get("/bills", async (c) => {
           billType || status || search || startDate || endDate || sponsorParty
         );
         if (!error && ((data?.length ?? 0) > 0 || hasCacheScopedFilters)) {
+          if ((data?.length ?? 0) === 0 && hasCacheScopedFilters) {
+            const seeded = await seedFilteredBillsFromCongress(
+              c.env,
+              apiKey,
+              congress_num,
+              billType,
+              sort,
+              status || null,
+              search || null,
+              startDate,
+              endDate,
+              sponsorParty,
+              limit,
+              offset
+            );
+            return c.json(
+              {
+                bills: seeded.bills,
+                count: undefined,
+                notice:
+                  seeded.bills.length > 0
+                    ? "Results were seeded from a bounded live Congress.gov scan and cached. Broader matches may appear after more cache warming."
+                    : "No cached bill matches were available. A bounded live scan ran and cached recent bill pages, but did not find a match yet.",
+                pagination: {
+                  offset,
+                  limit,
+                  count: undefined,
+                  hasMore: seeded.partial && seeded.matchedCount >= offset + limit,
+                  filtered: true,
+                  scanned: seeded.scanned,
+                },
+              },
+              200,
+              { "Cache-Control": "public, max-age=300" }
+            );
+          }
+
           const normalizedBills = (data ?? []).map((row) =>
             normalizeBillForList(
               {
