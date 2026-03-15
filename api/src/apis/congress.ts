@@ -2854,9 +2854,125 @@ congress.get("/bills", async (c) => {
 
   const hasSummaryFilters = Boolean(status || search || startDate || endDate);
   const hasMetadataFilters = Boolean(sponsorParty || sponsor || committee);
-  const requiresScan = hasSummaryFilters || hasMetadataFilters;
+  const requiresScan = Boolean(sponsor || committee);
+  const canServeFromCacheOnly = hasSummaryFilters || sponsorParty || !requiresScan;
 
   try {
+    if (canServeFromCacheOnly && hasSupabase(c.env)) {
+      try {
+        const sb = getSupabase(c.env);
+        const sortColumn = sort.startsWith("introducedDate")
+          ? "introduced_date"
+          : "latest_action_date";
+        const ascending = sort.endsWith("+asc");
+        let cacheQuery = sb
+          .from("bills")
+          .select(
+            "congress,bill_type,bill_number,title,policy_area,latest_action_text,latest_action_date,origin_chamber,update_date,introduced_date,sponsor_bioguide_id,sponsor_name,sponsor_party,sponsor_state,committee_names,bill_status,bill_status_label,bill_status_step,updated_at",
+            { count: "exact" }
+          )
+          .eq("congress", parseInt(congress_num, 10))
+          .order(sortColumn, { ascending, nullsFirst: false })
+          .order("bill_number", { ascending: true })
+          .range(offset, offset + limit - 1);
+
+        if (billType) {
+          cacheQuery = cacheQuery.eq("bill_type", billType);
+        }
+        if (status) {
+          cacheQuery = cacheQuery.eq("bill_status", status);
+        }
+        if (sponsorParty) {
+          cacheQuery = cacheQuery.eq("sponsor_party", sponsorParty);
+        }
+        if (startDate) {
+          cacheQuery = cacheQuery.gte("latest_action_date", startDate);
+        }
+        if (endDate) {
+          cacheQuery = cacheQuery.lte("latest_action_date", endDate);
+        }
+        if (search) {
+          const q = `%${search}%`;
+          cacheQuery = cacheQuery.or(
+            `title.ilike.${q},latest_action_text.ilike.${q},policy_area.ilike.${q},sponsor_name.ilike.${q}`
+          );
+        }
+
+        const { data, count, error } = await cacheQuery;
+        const hasCacheScopedFilters = Boolean(
+          billType || status || search || startDate || endDate || sponsorParty
+        );
+        if (!error && ((data?.length ?? 0) > 0 || hasCacheScopedFilters)) {
+          const normalizedBills = (data ?? []).map((row) =>
+            normalizeBillForList(
+              {
+                congress: asNumber(row.congress) ?? undefined,
+                type: typeof row.bill_type === "string" ? row.bill_type : undefined,
+                number: asNumber(row.bill_number) ?? undefined,
+                title: typeof row.title === "string" ? row.title : undefined,
+                originChamber:
+                  typeof row.origin_chamber === "string" ? row.origin_chamber : undefined,
+                updateDate: typeof row.update_date === "string" ? row.update_date : undefined,
+                introducedDate:
+                  typeof row.introduced_date === "string" ? row.introduced_date : undefined,
+                latestAction: {
+                  text:
+                    typeof row.latest_action_text === "string"
+                      ? row.latest_action_text
+                      : undefined,
+                  actionDate:
+                    typeof row.latest_action_date === "string"
+                      ? row.latest_action_date
+                      : undefined,
+                },
+                policyArea:
+                  typeof row.policy_area === "string" ? { name: row.policy_area } : undefined,
+              },
+              row as CachedBillRow
+            )
+          );
+
+          if (data && data.length > 0 && isRowSetStale(data, BILLS_CACHE_STALE_MS)) {
+            c.executionCtx.waitUntil(
+              fetchCongressBillsPage(apiKey, congress_num, billType, limit, offset, sort)
+                .then((payload) =>
+                  upsertCachedBills(
+                    c.env,
+                    (payload.bills ?? [])
+                      .map((bill) => toBillCacheRow(bill))
+                      .filter(Boolean) as Array<Record<string, unknown>>
+                  )
+                )
+                .catch(() => undefined)
+            );
+          }
+
+          return c.json(
+            {
+              bills: normalizedBills,
+              count: count ?? normalizedBills.length,
+              notice:
+                hasCacheScopedFilters
+                  ? "Filtered bill results are served from the warmed Supabase cache to avoid worker timeouts."
+                  : undefined,
+              pagination: {
+                offset,
+                limit,
+                count: count ?? normalizedBills.length,
+                hasMore: count != null ? offset + limit < count : normalizedBills.length === limit,
+                filtered: hasCacheScopedFilters ? true : undefined,
+                scanned: undefined,
+              },
+            },
+            200,
+            { "Cache-Control": "public, max-age=900" }
+          );
+        }
+      } catch {
+        // Fall through to live fetch or limited scan below.
+      }
+    }
+
     if (!requiresScan) {
       if (hasSupabase(c.env)) {
         try {
