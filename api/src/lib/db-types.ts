@@ -364,6 +364,9 @@ interface ContributionsRow {
   candidate_id: string | null;
   committee_id: string | null;
   committee_name: string | null;
+  recipient_name: string | null;
+  normalized_recipient_name: string | null;
+  pdf_url: string | null;
   contributor_name: string | null;
   contributor_employer: string | null;
   contributor_occupation: string | null;
@@ -379,6 +382,9 @@ interface ContributionsInsert {
   candidate_id?: string | null;
   committee_id?: string | null;
   committee_name?: string | null;
+  recipient_name?: string | null;
+  normalized_recipient_name?: string | null;
+  pdf_url?: string | null;
   contributor_name?: string | null;
   contributor_employer?: string | null;
   contributor_occupation?: string | null;

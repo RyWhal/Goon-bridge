@@ -6,12 +6,12 @@
   "scripts": {
     "dev": "npm run dev:ui & npm run dev:api & wait",
     "dev:ui": "vite",
-    "dev:api": "cd api && npx wrangler dev",
+    "dev:api": "cd api && npm run dev",
     "build": "tsc && vite build",
-    "build:api": "cd api && tsc --noEmit",
+    "build:api": "cd api && npm run build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit && cd api && tsc --noEmit",
-    "deploy:api": "cd api && npx wrangler deploy"
+    "typecheck": "tsc --noEmit && npm run build:api",
+    "deploy:api": "cd api && npm run deploy"
   },
   "dependencies": {
     "react": "^18.2.0",

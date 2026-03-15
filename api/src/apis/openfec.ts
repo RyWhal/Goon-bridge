@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { getSupabase } from "../lib/supabase";
+import { ensureOrganization, normalizeOrganizationName } from "../lib/relationships";
 
 const openfec = new Hono<Env>();
 
@@ -37,9 +38,13 @@ class FecUpstreamError extends Error {
 type SummaryTopN = 5 | 10 | 20;
 
 interface FecContributionResult {
+  [key: string]: unknown;
   candidate_id?: string;
+  candidate_name?: string;
   committee_id?: string;
   committee?: { name?: string };
+  recipient_name?: string;
+  recipient_organization_id?: number;
   contributor_name?: string;
   contributor_employer?: string;
   contributor_occupation?: string;
@@ -47,12 +52,16 @@ interface FecContributionResult {
   contribution_receipt_amount?: number;
   contribution_receipt_date?: string;
   two_year_transaction_period?: number;
+  pdf_url?: string;
 }
 
 interface CachedContributionRow {
   candidate_id: string | null;
   committee_id: string | null;
   committee_name: string | null;
+  recipient_name: string | null;
+  normalized_recipient_name: string | null;
+  pdf_url: string | null;
   contributor_name: string | null;
   contributor_employer: string | null;
   contributor_occupation: string | null;
@@ -335,6 +344,30 @@ function defaultTwoYearPeriod(): string {
   const year = now.getUTCFullYear();
   const evenYear = year % 2 === 0 ? year : year + 1;
   return String(evenYear);
+}
+
+function deriveRecipientName(row: {
+  recipient_name?: string | null;
+  committee?: { name?: string } | null;
+  committee_name?: string | null;
+  candidate_name?: string | null;
+}): string | null {
+  const recipientName =
+    row.recipient_name ??
+    row.committee?.name ??
+    row.committee_name ??
+    row.candidate_name ??
+    null;
+  return recipientName?.replace(/\s+/g, " ").trim() || null;
+}
+
+function normalizeRecipientName(value?: string | null): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+  const normalized = normalizeOrganizationName(cleaned);
+  if (normalized) return normalized;
+  return cleaned.toUpperCase();
 }
 
 const EXCLUDED_EMPLOYER_KEYS = new Set([
@@ -970,14 +1003,17 @@ function queueCandidateSummaryRefresh(
 
 function mapFecRowsToCacheRows(
   rows: FecContributionResult[],
-  candidateId: string,
+  candidateId: string | null,
   fallbackCommitteeId: string | null,
   twoYearPeriod: string
 ): CachedContributionRow[] {
   return rows.map((r) => ({
-    candidate_id: candidateId,
+    candidate_id: r.candidate_id ?? candidateId,
     committee_id: r.committee_id ?? fallbackCommitteeId ?? null,
     committee_name: r.committee?.name ?? null,
+    recipient_name: deriveRecipientName(r),
+    normalized_recipient_name: normalizeRecipientName(deriveRecipientName(r)),
+    pdf_url: r.pdf_url ?? null,
     contributor_name: r.contributor_name ?? null,
     contributor_employer: r.contributor_employer ?? null,
     contributor_occupation: r.contributor_occupation ?? null,
@@ -992,6 +1028,9 @@ function mapCachedRowsToApiRows(rows: Array<{
   candidate_id: string | null;
   committee_id: string | null;
   committee_name: string | null;
+  recipient_name: string | null;
+  normalized_recipient_name: string | null;
+  pdf_url: string | null;
   contributor_name: string | null;
   contributor_employer: string | null;
   contributor_occupation: string | null;
@@ -1004,6 +1043,7 @@ function mapCachedRowsToApiRows(rows: Array<{
     candidate_id: r.candidate_id ?? undefined,
     committee_id: r.committee_id ?? undefined,
     committee: { name: r.committee_name ?? undefined },
+    recipient_name: r.recipient_name ?? undefined,
     contributor_name: r.contributor_name ?? undefined,
     contributor_employer: r.contributor_employer ?? undefined,
     contributor_occupation: r.contributor_occupation ?? undefined,
@@ -1011,7 +1051,179 @@ function mapCachedRowsToApiRows(rows: Array<{
     contribution_receipt_amount: r.contribution_amount ?? undefined,
     contribution_receipt_date: r.contribution_date ?? undefined,
     two_year_transaction_period: r.two_year_period ?? undefined,
+    pdf_url: r.pdf_url ?? undefined,
   }));
+}
+
+async function persistRecipientOrganizations(
+  sb: ReturnType<typeof getSupabase>,
+  rows: FecContributionResult[]
+) {
+  const uniqueRecipients = new Map<string, { committeeId: string | null; recipientName: string }>();
+
+  for (const row of rows) {
+    const recipientName = deriveRecipientName(row);
+    if (!recipientName) continue;
+    const key = `${row.committee_id ?? "no-committee"}:${recipientName}`;
+    if (uniqueRecipients.has(key)) continue;
+    uniqueRecipients.set(key, {
+      committeeId: row.committee_id ?? null,
+      recipientName,
+    });
+  }
+
+  for (const recipient of uniqueRecipients.values()) {
+    await ensureOrganization(sb, {
+      canonicalName: recipient.recipientName,
+      aliasSourceType: "openfec_recipient",
+      aliasSourceRowId: recipient.committeeId ?? recipient.recipientName,
+      identifiers: recipient.committeeId
+        ? [
+            {
+              sourceType: "openfec_committee",
+              identifierType: "committee_id",
+              identifierValue: recipient.committeeId,
+            },
+          ]
+        : [],
+      sourceCoverage: {
+        campaign_recipients: true,
+        openfec_committees: true,
+      },
+    });
+  }
+}
+
+async function enrichContributionResults(
+  sb: ReturnType<typeof getSupabase>,
+  rows: FecContributionResult[]
+): Promise<FecContributionResult[]> {
+  const candidateIds = [...new Set(rows.map((row) => row.candidate_id).filter((value): value is string => !!value))];
+  const committeeIds = [...new Set(rows.map((row) => row.committee_id).filter((value): value is string => !!value))];
+
+  const [candidateRowsResult, identifierRowsResult] = await Promise.all([
+    candidateIds.length
+      ? sb.from("fec_candidates").select("candidate_id,name").in("candidate_id", candidateIds)
+      : Promise.resolve({ data: [], error: null }),
+    committeeIds.length
+      ? sb
+          .from("organization_identifiers")
+          .select("organization_id,identifier_value")
+          .eq("source_type", "openfec_committee")
+          .eq("identifier_type", "committee_id")
+          .in("identifier_value", committeeIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  if (candidateRowsResult.error) {
+    throw new Error(`Failed to enrich contribution candidate names: ${candidateRowsResult.error.message}`);
+  }
+
+  if (identifierRowsResult.error) {
+    throw new Error(`Failed to enrich contribution recipient identities: ${identifierRowsResult.error.message}`);
+  }
+
+  const candidateNameById = new Map(
+    (candidateRowsResult.data ?? [])
+      .filter((row) => typeof row.candidate_id === "string")
+      .map((row) => [row.candidate_id, row.name ?? undefined] as const)
+  );
+  const organizationIdByCommitteeId = new Map(
+    (identifierRowsResult.data ?? [])
+      .filter(
+        (row): row is { organization_id: number; identifier_value: string } =>
+          typeof row.organization_id === "number" && typeof row.identifier_value === "string"
+      )
+      .map((row) => [row.identifier_value, row.organization_id] as const)
+  );
+
+  return rows.map((row) => {
+    const candidateName = row.candidate_name ?? (
+      row.candidate_id ? candidateNameById.get(row.candidate_id) : undefined
+    );
+    const recipientName = deriveRecipientName({
+      ...row,
+      candidate_name: candidateName ?? null,
+    });
+
+    return {
+      ...row,
+      candidate_name: candidateName,
+      recipient_name: recipientName ?? undefined,
+      recipient_organization_id: row.committee_id
+        ? organizationIdByCommitteeId.get(row.committee_id)
+        : undefined,
+    };
+  });
+}
+
+async function resolveRecipientSearchTargets(
+  sb: ReturnType<typeof getSupabase>,
+  recipientQuery: string
+) {
+  const normalizedQuery = normalizeRecipientName(recipientQuery);
+
+  const [candidateRowsResult, aliasRowsResult] = await Promise.all([
+    sb
+      .from("fec_candidates")
+      .select("candidate_id")
+      .ilike("name", `%${recipientQuery}%`)
+      .limit(10),
+    normalizedQuery
+      ? sb
+          .from("organization_aliases")
+          .select("organization_id")
+          .ilike("normalized_alias", `%${normalizedQuery}%`)
+          .limit(10)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  if (candidateRowsResult.error) {
+    throw new Error(`Failed to resolve candidate recipient targets: ${candidateRowsResult.error.message}`);
+  }
+
+  if (aliasRowsResult.error) {
+    throw new Error(`Failed to resolve committee recipient targets: ${aliasRowsResult.error.message}`);
+  }
+
+  const organizationIds = [
+    ...new Set(
+      (aliasRowsResult.data ?? [])
+        .map((row) => row.organization_id)
+        .filter((value): value is number => typeof value === "number")
+    ),
+  ];
+
+  const identifierRowsResult = organizationIds.length
+    ? await sb
+        .from("organization_identifiers")
+        .select("identifier_value")
+        .eq("source_type", "openfec_committee")
+        .eq("identifier_type", "committee_id")
+        .in("organization_id", organizationIds)
+    : { data: [], error: null };
+
+  if (identifierRowsResult.error) {
+    throw new Error(`Failed to load committee recipient targets: ${identifierRowsResult.error.message}`);
+  }
+
+  return {
+    normalizedQuery,
+    candidateIds: [
+      ...new Set(
+        (candidateRowsResult.data ?? [])
+          .map((row) => row.candidate_id)
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+      ),
+    ],
+    committeeIds: [
+      ...new Set(
+        (identifierRowsResult.data ?? [])
+          .map((row) => row.identifier_value)
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+      ),
+    ],
+  };
 }
 
 // ── GET /api/fec/candidates ──────────────────────────────────────────────────
@@ -1126,6 +1338,7 @@ openfec.get("/contributions", async (c) => {
   };
 
   const candidateId = c.req.query("candidate_id");
+  const recipientName = c.req.query("recipient_name")?.trim() ?? "";
   const twoYearPeriod = c.req.query("two_year_period") ?? defaultTwoYearPeriod();
   params["two_year_transaction_period"] = twoYearPeriod;
 
@@ -1141,8 +1354,17 @@ openfec.get("/contributions", async (c) => {
 
     let cacheQuery = sb
       .from("contributions")
-      .select("candidate_id, committee_id, committee_name, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
+      .select("candidate_id, committee_id, committee_name, recipient_name, normalized_recipient_name, pdf_url, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" })
       .eq("candidate_id", candidateId);
+
+    if (recipientName) {
+      const normalizedRecipientName = normalizeRecipientName(recipientName);
+      if (normalizedRecipientName) {
+        cacheQuery = cacheQuery.ilike("normalized_recipient_name", `%${normalizedRecipientName}%`);
+      } else {
+        cacheQuery = cacheQuery.ilike("recipient_name", `%${recipientName}%`);
+      }
+    }
 
     if (!includeRefunds) {
       cacheQuery = cacheQuery.gt("contribution_amount", 0);
@@ -1180,8 +1402,12 @@ openfec.get("/contributions", async (c) => {
     const pages = limit > 0 ? Math.max(1, Math.ceil(totalCount / limit)) : 1;
 
     if (hasCachedRows) {
+      const results = await enrichContributionResults(
+        sb,
+        mapCachedRowsToApiRows(cachedRows ?? [])
+      );
       return c.json({
-        results: mapCachedRowsToApiRows(cachedRows ?? []),
+        results,
         pagination: {
           count: totalCount,
           page,
@@ -1189,7 +1415,9 @@ openfec.get("/contributions", async (c) => {
         },
         query_context: {
           source: "supabase_cache",
+          pagination_mode: "offset",
           candidate_id: candidateId,
+          recipient_name: recipientName || null,
           page,
           per_page: limit,
           sort,
@@ -1249,7 +1477,14 @@ openfec.get("/contributions", async (c) => {
           committeeId,
           twoYearPeriod
         );
-        c.executionCtx.waitUntil(Promise.resolve(sb.from("contributions").insert(rows)));
+        const enrichedLiveResults = await enrichContributionResults(sb, liveData.results);
+        c.executionCtx.waitUntil(
+          Promise.all([
+            Promise.resolve(sb.from("contributions").insert(rows)),
+            persistRecipientOrganizations(sb, enrichedLiveResults),
+          ])
+        );
+        liveData.results = enrichedLiveResults;
       }
 
       return c.json({
@@ -1257,8 +1492,10 @@ openfec.get("/contributions", async (c) => {
         pagination: normalizedLivePagination,
         query_context: {
           source: "openfec_live",
+          pagination_mode: "offset",
           candidate_id: candidateId,
           resolved_committee_id: committeeId ?? null,
+          recipient_name: recipientName || null,
           page,
           per_page: limit,
           sort,
@@ -1318,6 +1555,134 @@ openfec.get("/contributions", async (c) => {
 
   const state = c.req.query("state");
   if (state) params["contributor_state"] = state;
+
+  let recipientSearchResolution:
+    | { mode: "cache_only"; candidate_ids: string[]; committee_ids: string[] }
+    | { mode: "live_candidate"; candidate_id: string }
+    | { mode: "live_committee"; committee_id: string }
+    | null = null;
+
+  if (recipientName && hasSupabase(c.env)) {
+    const sb = getSupabase(c.env);
+    const limit = requestedPerPage;
+    const page = requestedPage;
+    const ascending = sort === "contribution_receipt_amount" || sort === "contribution_receipt_date";
+    const sortColumn = sort.includes("amount") ? "contribution_amount" : "contribution_date";
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+    const resolvedTargets = await resolveRecipientSearchTargets(sb, recipientName);
+
+    let cacheQuery = sb
+      .from("contributions")
+      .select("candidate_id, committee_id, committee_name, recipient_name, normalized_recipient_name, pdf_url, contributor_name, contributor_employer, contributor_occupation, contributor_state, contribution_amount, contribution_date, two_year_period", { count: "exact" });
+
+    if (!includeRefunds) {
+      cacheQuery = cacheQuery.gt("contribution_amount", 0);
+    }
+    if (employer) cacheQuery = cacheQuery.ilike("contributor_employer", `%${employer}%`);
+    if (contributorName) cacheQuery = cacheQuery.ilike("contributor_name", `%${contributorName}%`);
+    if (minAmount) {
+      const parsedMinAmount = Number(minAmount);
+      if (Number.isFinite(parsedMinAmount)) {
+        cacheQuery = cacheQuery.gte("contribution_amount", includeRefunds ? parsedMinAmount : Math.max(parsedMinAmount, 0.01));
+      }
+    }
+    if (maxAmount) {
+      const parsedMaxAmount = Number(maxAmount);
+      if (Number.isFinite(parsedMaxAmount)) cacheQuery = cacheQuery.lte("contribution_amount", parsedMaxAmount);
+    }
+    if (state) cacheQuery = cacheQuery.eq("contributor_state", state);
+
+    const recipientClauses: string[] = [];
+    if (resolvedTargets.normalizedQuery) {
+      recipientClauses.push(`normalized_recipient_name.ilike.%${resolvedTargets.normalizedQuery}%`);
+    }
+    if (resolvedTargets.candidateIds.length) {
+      recipientClauses.push(`candidate_id.in.(${resolvedTargets.candidateIds.join(",")})`);
+    }
+    if (resolvedTargets.committeeIds.length) {
+      recipientClauses.push(`committee_id.in.(${resolvedTargets.committeeIds.join(",")})`);
+    }
+
+    if (recipientClauses.length) {
+      cacheQuery = cacheQuery.or(recipientClauses.join(","));
+    } else {
+      cacheQuery = cacheQuery.ilike("recipient_name", `%${recipientName}%`);
+    }
+
+    const { data: cachedRows, count, error: cacheError } = await cacheQuery
+      .order(sortColumn, { ascending, nullsFirst: false })
+      .range(from, to);
+
+    if (cacheError) {
+      return c.json({ error: `Failed to query cached contributions: ${cacheError.message}` }, 500);
+    }
+
+    if ((cachedRows?.length ?? 0) > 0) {
+      const totalCount = count ?? 0;
+      const pages = limit > 0 ? Math.max(1, Math.ceil(totalCount / limit)) : 1;
+      const results = await enrichContributionResults(
+        sb,
+        mapCachedRowsToApiRows(cachedRows ?? [])
+      );
+      return c.json({
+        results,
+        pagination: {
+          count: totalCount,
+          page,
+          pages,
+        },
+        query_context: {
+          source: "supabase_cache",
+          pagination_mode: "offset",
+          recipient_name: recipientName,
+          page,
+          per_page: limit,
+          sort,
+          resolved_candidate_ids: resolvedTargets.candidateIds,
+          resolved_committee_ids: resolvedTargets.committeeIds,
+        },
+      }, 200, { "Cache-Control": "public, max-age=300" });
+    }
+
+    if (resolvedTargets.committeeIds.length === 1) {
+      params["committee_id"] = resolvedTargets.committeeIds[0];
+      recipientSearchResolution = {
+        mode: "live_committee",
+        committee_id: resolvedTargets.committeeIds[0],
+      };
+    } else if (resolvedTargets.candidateIds.length === 1) {
+      params["candidate_id"] = resolvedTargets.candidateIds[0];
+      recipientSearchResolution = {
+        mode: "live_candidate",
+        candidate_id: resolvedTargets.candidateIds[0],
+      };
+    } else {
+      recipientSearchResolution = {
+        mode: "cache_only",
+        candidate_ids: resolvedTargets.candidateIds,
+        committee_ids: resolvedTargets.committeeIds,
+      };
+      return c.json({
+        results: [],
+        pagination: {
+          count: 0,
+          page,
+          pages: 1,
+        },
+        query_context: {
+          source: "recipient_search_unresolved_live_filter",
+          pagination_mode: "offset",
+          recipient_name: recipientName,
+          page,
+          per_page: limit,
+          sort,
+          resolved_candidate_ids: resolvedTargets.candidateIds,
+          resolved_committee_ids: resolvedTargets.committeeIds,
+        },
+      }, 200, { "Cache-Control": "no-store" });
+    }
+  }
 
   // OpenFEC schedule_a uses keyset pagination via `last_indexes`.
   const cursorKeys = [
@@ -1395,8 +1760,10 @@ openfec.get("/contributions", async (c) => {
     const data = (await resp.json()) as {
       results?: Array<{
         candidate_id?: string;
+        candidate_name?: string;
         committee_id?: string;
         committee?: { name?: string };
+        recipient_name?: string;
         contributor_name?: string;
         contributor_employer?: string;
         contributor_occupation?: string;
@@ -1404,6 +1771,7 @@ openfec.get("/contributions", async (c) => {
         contribution_receipt_amount?: number;
         contribution_receipt_date?: string;
         two_year_transaction_period?: number;
+        pdf_url?: string;
         [key: string]: unknown;
       }>;
       pagination?: {
@@ -1427,23 +1795,20 @@ openfec.get("/contributions", async (c) => {
     // Cache contributions to Supabase in the background
     if (hasSupabase(c.env) && data.results?.length) {
       const sb = getSupabase(c.env);
-      const rows = data.results
-        .filter((r) => r.candidate_id || r.committee_id)
-        .map((r) => ({
-          candidate_id: r.candidate_id ?? null,
-          committee_id: r.committee_id ?? null,
-          committee_name: r.committee?.name ?? null,
-          contributor_name: r.contributor_name ?? null,
-          contributor_employer: r.contributor_employer ?? null,
-          contributor_occupation: r.contributor_occupation ?? null,
-          contributor_state: r.contributor_state ?? null,
-          contribution_amount: r.contribution_receipt_amount ?? null,
-          contribution_date: r.contribution_receipt_date ?? null,
-          two_year_period: r.two_year_transaction_period ?? null,
-        }));
-      c.executionCtx.waitUntil(
-        Promise.resolve(sb.from("contributions").insert(rows))
+      const enrichedResults = await enrichContributionResults(sb, data.results);
+      const rows = mapFecRowsToCacheRows(
+        enrichedResults,
+        candidateId ?? null,
+        params["committee_id"] ?? null,
+        twoYearPeriod
       );
+      c.executionCtx.waitUntil(
+        Promise.all([
+          Promise.resolve(sb.from("contributions").insert(rows)),
+          persistRecipientOrganizations(sb, enrichedResults),
+        ])
+      );
+      data.results = enrichedResults;
     }
 
     return c.json({
@@ -1451,8 +1816,10 @@ openfec.get("/contributions", async (c) => {
       pagination: normalizedPagination,
       query_context: {
         source: "openfec_live",
+        pagination_mode: "cursor",
         candidate_id: candidateId ?? null,
         committee_id: params["committee_id"] ?? null,
+        recipient_name: recipientName || null,
         include_refunds: includeRefunds,
         page: requestedPage,
         per_page: requestedPerPage,
@@ -1460,6 +1827,7 @@ openfec.get("/contributions", async (c) => {
         sort_applied: sortApplied,
         fallback_sort_applied: fallbackSortApplied,
         next_cursor: data.pagination?.last_indexes ?? null,
+        recipient_search_resolution: recipientSearchResolution,
       },
     }, 200, { "Cache-Control": "no-store" });
   } catch (error) {
