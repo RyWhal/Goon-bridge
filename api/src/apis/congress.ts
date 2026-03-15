@@ -66,6 +66,26 @@ function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
 }
 
+const MEMBERS_CACHE_STALE_MS = 12 * 60 * 60 * 1000;
+const MEMBER_DETAIL_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+const VOTES_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
+const VOTE_DETAIL_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
+const BILLS_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
+
+type CachedTimestampRow = { updated_at?: string | null };
+type BillCacheTable = "bill_details_cache" | "bill_actions_cache" | "bill_cosponsors_cache";
+
+function isTimestampStale(updatedAt: string | null | undefined, staleMs: number): boolean {
+  if (!updatedAt) return true;
+  const parsed = new Date(updatedAt);
+  return Number.isNaN(parsed.getTime()) || Date.now() - parsed.getTime() > staleMs;
+}
+
+function isRowSetStale(rows: CachedTimestampRow[], staleMs: number): boolean {
+  if (rows.length === 0) return true;
+  return rows.some((row) => isTimestampStale(row.updated_at, staleMs));
+}
+
 
 function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -226,14 +246,14 @@ async function loadSenateMemberLookup(
     try {
       const sb = getSupabase(env);
       const { data, error } = await sb
-        .from("members")
-        .select("bioguide_id,name,direct_order_name,party,state,chamber,congress")
+        .from("member_congresses")
+        .select("bioguide_id,name,party,state,chamber,congress")
         .eq("congress", congress)
         .eq("chamber", "Senate");
 
       if (!error && data?.length) {
         return data.map((row) => {
-          const parsedName = splitPersonName(row.direct_order_name ?? row.name ?? row.bioguide_id);
+          const parsedName = splitPersonName(row.name ?? row.bioguide_id);
           return {
             bioguideId: row.bioguide_id,
             firstName: parsedName.firstName,
@@ -414,6 +434,392 @@ async function refreshMemberVoteStats(env: Env["Bindings"], bioguideIds: string[
     });
   } catch {
     // Best-effort aggregation refresh
+  }
+}
+
+async function cacheMembersToSupabase(
+  env: Env["Bindings"],
+  congressNum: number,
+  members: Array<{
+    bioguideId?: string;
+    name?: string;
+    directOrderName?: string;
+    party?: string | null;
+    state?: string;
+    district?: number;
+    depiction?: { imageUrl?: string };
+  }>
+) {
+  if (!hasSupabase(env) || members.length === 0) return;
+  const sb = getSupabase(env);
+  const timestamp = new Date().toISOString();
+  const canonicalRows = members
+    .filter((member) => member.bioguideId)
+    .map((member) => ({
+      bioguide_id: member.bioguideId!,
+      name: member.name ?? "",
+      direct_order_name: typeof member.directOrderName === "string" ? member.directOrderName : null,
+      party: member.party ?? null,
+      state: member.state ?? null,
+      district: member.district ?? null,
+      chamber: extractMemberChamber(member) ?? null,
+      image_url: normalizeMemberImageUrl(member.depiction?.imageUrl) ?? null,
+      congress: congressNum,
+      updated_at: timestamp,
+    }));
+  const congressRows = members
+    .filter((member) => member.bioguideId)
+    .map((member) => ({
+      bioguide_id: member.bioguideId!,
+      congress: congressNum,
+      name: member.name ?? "",
+      party: member.party ?? null,
+      state: member.state ?? null,
+      district: member.district ?? null,
+      chamber: extractMemberChamber(member) ?? null,
+      image_url: normalizeMemberImageUrl(member.depiction?.imageUrl) ?? null,
+      updated_at: timestamp,
+    }));
+
+  await Promise.all([
+    canonicalRows.length
+      ? sb.from("members").upsert(canonicalRows, { onConflict: "bioguide_id" })
+      : Promise.resolve(),
+    congressRows.length
+      ? sb.from("member_congresses").upsert(congressRows, { onConflict: "bioguide_id,congress" })
+      : Promise.resolve(),
+  ]);
+}
+
+async function fetchMembersFromCongress(
+  env: Env["Bindings"],
+  apiKey: string,
+  congressNum: string,
+  limit: number,
+  offset: number
+) {
+  const data = await fetchCongressMembersPage(apiKey, congressNum, limit, offset);
+  const normalizedMembers = normalizeCongressMembers(data.members ?? []);
+  await cacheMembersToSupabase(env, parseInt(congressNum, 10), normalizedMembers);
+  return {
+    members: normalizedMembers,
+    count: data.pagination?.count ?? normalizedMembers.length,
+    pagination: data.pagination,
+  };
+}
+
+function queueMembersRefresh(
+  executionCtx: ExecutionContext,
+  env: Env["Bindings"],
+  apiKey: string,
+  congressNum: string,
+  limit: number,
+  offset: number
+) {
+  executionCtx.waitUntil(
+    fetchMembersFromCongress(env, apiKey, congressNum, limit, offset).catch(() => undefined)
+  );
+}
+
+async function fetchMemberDetailFromCongress(
+  env: Env["Bindings"],
+  apiKey: string,
+  bioguideId: string
+) {
+  const resp = await congressFetch(`/member/${bioguideId}`, apiKey);
+  if (!resp.ok) {
+    return {
+      ok: false as const,
+      status: resp.status,
+    };
+  }
+
+  const data = (await resp.json()) as {
+    member?: CongressMemberLike & Record<string, unknown>;
+    [key: string]: unknown;
+  };
+
+  if (data.member) {
+    data.member.party = extractMemberParty(data.member) ?? undefined;
+  }
+
+  if (hasSupabase(env)) {
+    const sb = getSupabase(env);
+    const timestamp = new Date().toISOString();
+    if (data.member) {
+      const summary = summarizeMemberTerms(data.member.terms);
+      const directOrderName =
+        typeof data.member.directOrderName === "string" ? data.member.directOrderName : null;
+      const chamber = normalizeChamberLabel(summary.chamber);
+      const congressesServed = deriveCongressesServed({
+        congressesServed: summary.congressesServed,
+        totalTerms: summary.totalTerms,
+        firstCongress: summary.firstCongress,
+        lastCongress: summary.lastCongress,
+      });
+      await sb.from("members").upsert(
+        {
+          bioguide_id: bioguideId,
+          name:
+            (typeof data.member.directOrderName === "string" && data.member.directOrderName) ||
+            (typeof data.member.name === "string" && data.member.name) ||
+            "",
+          direct_order_name: directOrderName,
+          party: typeof data.member.party === "string" ? data.member.party : null,
+          state: typeof data.member.state === "string" ? data.member.state : null,
+          district: typeof data.member.district === "number" ? data.member.district : null,
+          chamber,
+          image_url:
+            typeof (data.member as { depiction?: { imageUrl?: string } }).depiction?.imageUrl === "string"
+              ? normalizeMemberImageUrl(
+                  (data.member as { depiction?: { imageUrl?: string } }).depiction?.imageUrl
+                ) ?? (data.member as { depiction?: { imageUrl?: string } }).depiction?.imageUrl ?? null
+              : null,
+          first_congress: summary.firstCongress,
+          last_congress: summary.lastCongress,
+          total_terms: summary.totalTerms,
+          congresses_served: congressesServed,
+          years_served: summary.yearsServed,
+          updated_at: timestamp,
+        },
+        { onConflict: "bioguide_id" }
+      );
+    }
+    await sb.from("member_details_cache").upsert(
+      {
+        bioguide_id: bioguideId,
+        payload: data,
+        updated_at: timestamp,
+      },
+      { onConflict: "bioguide_id" }
+    );
+  }
+
+  return {
+    ok: true as const,
+    data,
+  };
+}
+
+function queueMemberDetailRefresh(
+  executionCtx: ExecutionContext,
+  env: Env["Bindings"],
+  apiKey: string,
+  bioguideId: string
+) {
+  executionCtx.waitUntil(
+    fetchMemberDetailFromCongress(env, apiKey, bioguideId).catch(() => undefined)
+  );
+}
+
+async function readVoteDetailFromSupabase(
+  env: Env["Bindings"],
+  congressNum: number,
+  chamber: string,
+  rollCallNumber: number
+) {
+  if (!hasSupabase(env)) return null;
+  const sb = getSupabase(env);
+  const { data: voteRow, error } = await sb
+    .from("votes")
+    .select("*")
+    .eq("congress", congressNum)
+    .eq("chamber", chamber)
+    .eq("roll_call_number", rollCallNumber)
+    .maybeSingle<{
+      id: number;
+      congress: number;
+      chamber: string;
+      date: string | null;
+      question: string | null;
+      description: string | null;
+      result: string | null;
+      total_yea: number | null;
+      total_nay: number | null;
+      total_not_voting: number | null;
+      updated_at: string | null;
+    }>();
+  if (error || !voteRow) return null;
+
+  const { data: memberVoteRows } = await sb
+    .from("member_votes")
+    .select("bioguide_id, position")
+    .eq("vote_id", voteRow.id);
+
+  const bioguideIds = dedupeBioguideIds((memberVoteRows ?? []).map((row) => row.bioguide_id));
+  const memberMap = new Map<string, { name: string | null; party: string | null; state: string | null }>();
+
+  if (bioguideIds.length > 0) {
+    const { data: memberRows } = await sb
+      .from("members")
+      .select("bioguide_id, name, party, state")
+      .in("bioguide_id", bioguideIds);
+    for (const row of memberRows ?? []) {
+      memberMap.set(row.bioguide_id, {
+        name: row.name,
+        party: row.party,
+        state: row.state,
+      });
+    }
+  }
+
+  return {
+    payload: {
+      vote: {
+        congress: voteRow.congress,
+        chamber: chamber === "senate" ? "Senate" : "House",
+        date: voteRow.date,
+        question: voteRow.question,
+        description: voteRow.description,
+        result: voteRow.result,
+        totalYea: voteRow.total_yea,
+        totalNay: voteRow.total_nay,
+        totalNotVoting: voteRow.total_not_voting,
+        members: (memberVoteRows ?? []).map((row) => {
+          const member = memberMap.get(row.bioguide_id);
+          const parsed = splitPersonName(member?.name ?? row.bioguide_id);
+          return {
+            bioguideId: row.bioguide_id,
+            fullName: member?.name ?? parsed.fullName,
+            firstName: parsed.firstName,
+            lastName: parsed.lastName,
+            party: member?.party ?? undefined,
+            state: member?.state ?? undefined,
+            votePosition: row.position,
+          };
+        }),
+      },
+      raw: voteRow,
+    },
+    updatedAt: voteRow.updated_at ?? null,
+    hasMembers: (memberVoteRows?.length ?? 0) > 0,
+  };
+}
+
+async function fetchBillPayloadAndCache(
+  env: Env["Bindings"],
+  apiKey: string,
+  table: BillCacheTable,
+  path: string,
+  congress: number,
+  type: string,
+  number: number,
+  params?: Record<string, string>
+) {
+  const resp = await congressFetch(path, apiKey, params);
+  if (!resp.ok) {
+    return {
+      ok: false as const,
+      status: resp.status,
+    };
+  }
+  const payload: unknown = await resp.json();
+  if (hasSupabase(env)) {
+    const sb = getSupabase(env);
+    await sb.from(table).upsert(
+      {
+        congress,
+        bill_type: type,
+        bill_number: number,
+        payload,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "congress,bill_type,bill_number" }
+    );
+  }
+  return {
+    ok: true as const,
+    data: payload,
+  };
+}
+
+function queueBillPayloadRefresh(
+  executionCtx: ExecutionContext,
+  env: Env["Bindings"],
+  apiKey: string,
+  table: BillCacheTable,
+  path: string,
+  congress: number,
+  type: string,
+  number: number,
+  params?: Record<string, string>
+) {
+  executionCtx.waitUntil(
+    fetchBillPayloadAndCache(env, apiKey, table, path, congress, type, number, params).catch(
+      () => undefined
+    )
+  );
+}
+
+async function refreshVoteListCache(
+  env: Env["Bindings"],
+  apiKey: string,
+  congressNum: string,
+  chamber: string | undefined,
+  limit: number,
+  offset: number
+) {
+  const requiredWindowSize = limit + offset;
+  const sessions = ["1", "2"];
+  const chamberNormalized = chamber?.toLowerCase();
+  const votePathPrefix = chamberNormalized === "senate" ? "senate-vote" : "house-vote";
+  const chamberLabel = chamberNormalized === "senate" ? "Senate" : "House";
+  const CONGRESS_MAX_LIMIT = 250;
+
+  type VoteListItem = {
+    congress?: number;
+    rollCallNumber?: number;
+    startDate?: string;
+    voteQuestion?: string;
+    result?: string;
+    voteType?: string;
+    legislationUrl?: string;
+  };
+
+  const fetchSessionVotes = async (session: string) => {
+    const votes: VoteListItem[] = [];
+    let pageOffset = 0;
+    while (votes.length < requiredWindowSize) {
+      const remaining = requiredWindowSize - votes.length;
+      const pageLimit = Math.min(CONGRESS_MAX_LIMIT, remaining);
+      const resp = await congressFetch(`/${votePathPrefix}/${congressNum}/${session}`, apiKey, {
+        limit: String(pageLimit),
+        offset: String(pageOffset),
+      });
+      if (!resp.ok) return votes;
+      const data = (await resp.json()) as {
+        houseRollCallVotes?: VoteListItem[];
+        senateRollCallVotes?: VoteListItem[];
+      };
+      const pageVotes = data.houseRollCallVotes ?? data.senateRollCallVotes ?? [];
+      if (pageVotes.length === 0) break;
+      votes.push(...pageVotes);
+      if (pageVotes.length < pageLimit) break;
+      pageOffset += pageLimit;
+    }
+    return votes;
+  };
+
+  const sessionVotes = (await Promise.all(sessions.map((session) => fetchSessionVotes(session)))).flat();
+  const rows = sessionVotes
+    .sort((left, right) => (right.startDate ?? "").localeCompare(left.startDate ?? ""))
+    .slice(offset, offset + limit)
+    .filter((vote) => vote.congress && vote.rollCallNumber)
+    .map((vote) =>
+      toVoteCacheRow({
+        congress: vote.congress!,
+        chamber: chamberLabel,
+        rollCallNumber: vote.rollCallNumber!,
+        date: vote.startDate ?? null,
+        question: vote.voteQuestion ?? vote.voteType ?? null,
+        description: vote.voteType ?? null,
+        result: vote.result ?? null,
+        bill: parseBillReferenceFromUrl(vote.legislationUrl),
+      })
+    );
+  if (rows.length > 0 && hasSupabase(env)) {
+    const sb = getSupabase(env);
+    await sb.from("votes").upsert(rows, { onConflict: "congress,chamber,roll_call_number" });
   }
 }
 
@@ -1422,7 +1828,6 @@ async function mapInBatches<T, R>(
 }
 
 // ── GET /api/congress/members ────────────────────────────────────────────────
-// List members — always fetch live Congress.gov data for correct per-congress counts
 congress.get("/members", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
@@ -1431,45 +1836,50 @@ congress.get("/members", async (c) => {
   const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 100);
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
 
-  try {
-    const data = await fetchCongressMembersPage(apiKey, currentCongress, limit, offset);
-    const normalizedMembers = normalizeCongressMembers(data.members ?? []);
-
-    // Cache members to Supabase in the background
-    if (hasSupabase(c.env) && normalizedMembers.length) {
+  if (hasSupabase(c.env)) {
+    try {
       const sb = getSupabase(c.env);
-      const rows = normalizedMembers
-        .filter((m) => m.bioguideId)
-        .map((m) => ({
-          bioguide_id: m.bioguideId!,
-          name: m.name ?? "",
-          direct_order_name:
-            typeof m.directOrderName === "string" ? m.directOrderName : null,
-          party: m.party ?? null,
-          state: m.state ?? null,
-          district: m.district ?? null,
-          chamber: extractMemberChamber(m) ?? null,
-          image_url: normalizeMemberImageUrl(m.depiction?.imageUrl) ?? null,
-          congress: parseInt(currentCongress, 10),
-        }));
-      // Fire and forget — don't block the response
-      c.executionCtx.waitUntil(
-        Promise.resolve(sb.from("members").upsert(rows, { onConflict: "bioguide_id" }))
-      );
+      const { data, count, error } = await sb
+        .from("member_congresses")
+        .select("*", { count: "exact" })
+        .eq("congress", parseInt(currentCongress, 10))
+        .order("name")
+        .range(offset, offset + limit - 1);
+      if (!error && data && data.length > 0) {
+        if (isRowSetStale(data, MEMBERS_CACHE_STALE_MS)) {
+          queueMembersRefresh(c.executionCtx, c.env, apiKey, currentCongress, limit, offset);
+        }
+        return c.json(
+          {
+            members: data.map((row) => ({
+              bioguideId: row.bioguide_id,
+              name: row.name,
+              party: normalizePartyValue(row.party) ?? row.party,
+              state: row.state,
+              district: row.district,
+              depiction: row.image_url ? { imageUrl: row.image_url } : undefined,
+            })),
+            count: count ?? data.length,
+          },
+          200,
+          { "Cache-Control": "public, max-age=3600" }
+        );
+      }
+    } catch {
+      // Fall through to live fetch.
     }
+  }
 
-    return c.json(
-      { ...data, members: normalizedMembers },
-      200,
-      { "Cache-Control": "public, max-age=3600" }
-    );
+  try {
+    const live = await fetchMembersFromCongress(c.env, apiKey, currentCongress, limit, offset);
+    return c.json(live, 200, { "Cache-Control": "public, max-age=3600" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
 
 // ── GET /api/congress/members/search ─────────────────────────────────────────
-// Search members by name — scan live Congress.gov member pages for complete results
+// Search members by name.
 congress.get("/members/search", async (c) => {
   const apiKey = c.env.CONGRESS_API_KEY;
   if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
@@ -1479,9 +1889,44 @@ congress.get("/members/search", async (c) => {
 
   const currentCongress = c.req.query("congress") ?? "119";
 
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const q = `%${query}%`;
+      const { data, error } = await sb
+        .from("member_congresses")
+        .select("*")
+        .eq("congress", parseInt(currentCongress, 10))
+        .or(`name.ilike.${q},state.ilike.${q},party.ilike.${q}`)
+        .order("name")
+        .limit(50);
+      if (!error && data && data.length > 0) {
+        if (isRowSetStale(data, MEMBERS_CACHE_STALE_MS)) {
+          queueMembersRefresh(c.executionCtx, c.env, apiKey, currentCongress, 250, 0);
+        }
+        return c.json(
+          {
+            members: data.map((row) => ({
+              bioguideId: row.bioguide_id,
+              name: row.name,
+              party: normalizePartyValue(row.party) ?? row.party,
+              state: row.state,
+              district: row.district,
+              depiction: row.image_url ? { imageUrl: row.image_url } : undefined,
+            })),
+            count: data.length,
+          },
+          200,
+          { "Cache-Control": "public, max-age=3600" }
+        );
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
+
   try {
     const normalizedMembers = normalizeCongressMembers(await fetchAllCongressMembers(apiKey, currentCongress));
-
     const qLower = query.toLowerCase();
     const filtered = normalizedMembers.filter((m) => {
       const name = (m.name ?? "").toLowerCase();
@@ -1489,34 +1934,14 @@ congress.get("/members/search", async (c) => {
       const party = (m.party ?? "").toLowerCase();
       return name.includes(qLower) || state.includes(qLower) || party.includes(qLower);
     });
-
-    // Cache all fetched members to Supabase in the background
-    if (hasSupabase(c.env) && normalizedMembers.length) {
-      const sb = getSupabase(c.env);
-      const rows = normalizedMembers
-        .filter((m) => m.bioguideId)
-        .map((m) => ({
-          bioguide_id: m.bioguideId!,
-          name: m.name ?? "",
-          direct_order_name:
-            typeof m.directOrderName === "string" ? m.directOrderName : null,
-          party: m.party ?? null,
-          state: m.state ?? null,
-          district: m.district ?? null,
-          chamber: extractMemberChamber(m) ?? null,
-          image_url: normalizeMemberImageUrl(m.depiction?.imageUrl) ?? null,
-          congress: parseInt(currentCongress, 10),
-        }));
+    if (normalizedMembers.length) {
       c.executionCtx.waitUntil(
-        Promise.resolve(sb.from("members").upsert(rows, { onConflict: "bioguide_id" }))
+        cacheMembersToSupabase(c.env, parseInt(currentCongress, 10), normalizedMembers)
       );
     }
-
-    return c.json(
-      { members: filtered, count: filtered.length },
-      200,
-      { "Cache-Control": "public, max-age=3600" }
-    );
+    return c.json({ members: filtered, count: filtered.length }, 200, {
+      "Cache-Control": "public, max-age=3600",
+    });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
@@ -1533,9 +1958,9 @@ congress.get("/members/browse", async (c) => {
       const sb = getSupabase(c.env);
       const [membersRes, statsRes] = await Promise.all([
         sb
-          .from("members")
+          .from("member_congresses")
           .select(
-            "bioguide_id,name,direct_order_name,party,state,district,chamber,image_url,congress,first_congress,last_congress,total_terms,congresses_served,years_served"
+            "bioguide_id,name,party,state,district,chamber,image_url,congress,updated_at"
           )
           .eq("congress", currentCongress)
           .order("name", { ascending: true }),
@@ -1564,18 +1989,16 @@ congress.get("/members/browse", async (c) => {
           senateVotes: stats?.senate_votes ?? null,
         });
         const firstCongress =
-          row.first_congress ??
           stats?.first_congress ??
           row.congress ??
           null;
         const lastCongress =
-          row.last_congress ??
           stats?.last_congress ??
           row.congress ??
           null;
         const congressesServed = deriveCongressesServed({
-          congressesServed: row.congresses_served,
-          totalTerms: row.total_terms,
+          congressesServed: null,
+          totalTerms: null,
           firstCongress,
           lastCongress,
         });
@@ -1583,7 +2006,7 @@ congress.get("/members/browse", async (c) => {
         return {
           bioguideId: row.bioguide_id,
           name: row.name,
-          directOrderName: row.direct_order_name,
+          directOrderName: undefined,
           party: row.party,
           state: row.state,
           district: row.district,
@@ -1672,53 +2095,31 @@ congress.get("/members/:bioguideId", async (c) => {
 
   const bioguideId = c.req.param("bioguideId");
 
-  try {
-    const resp = await congressFetch(`/member/${bioguideId}`, apiKey);
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
-    }
-    const data = (await resp.json()) as {
-      member?: CongressMemberLike & Record<string, unknown>;
-      [key: string]: unknown;
-    };
-
-    if (data.member) {
-      data.member.party = extractMemberParty(data.member) ?? undefined;
-
-      if (hasSupabase(c.env)) {
-        const summary = summarizeMemberTerms(data.member.terms);
-        const sb = getSupabase(c.env);
-        const directOrderName =
-          typeof data.member.directOrderName === "string" ? data.member.directOrderName : null;
-        const chamber = normalizeChamberLabel(summary.chamber);
-        const congressesServed = deriveCongressesServed({
-          congressesServed: summary.congressesServed,
-          totalTerms: summary.totalTerms,
-          firstCongress: summary.firstCongress,
-          lastCongress: summary.lastCongress,
-        });
-
-        c.executionCtx.waitUntil(
-          Promise.resolve(
-            sb
-              .from("members")
-              .update({
-                direct_order_name: directOrderName,
-                chamber,
-                first_congress: summary.firstCongress,
-                last_congress: summary.lastCongress,
-                total_terms: summary.totalTerms,
-                congresses_served: congressesServed,
-                years_served: summary.yearsServed,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("bioguide_id", bioguideId)
-          )
-        );
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const { data, error } = await sb
+        .from("member_details_cache")
+        .select("payload, updated_at")
+        .eq("bioguide_id", bioguideId)
+        .maybeSingle<{ payload: Record<string, unknown>; updated_at: string | null }>();
+      if (!error && data?.payload) {
+        if (isTimestampStale(data.updated_at, MEMBER_DETAIL_CACHE_STALE_MS)) {
+          queueMemberDetailRefresh(c.executionCtx, c.env, apiKey, bioguideId);
+        }
+        return c.json(data.payload, 200, { "Cache-Control": "public, max-age=3600" });
       }
+    } catch {
+      // Fall through to live fetch.
     }
+  }
 
-    return c.json(data, 200, { "Cache-Control": "public, max-age=3600" });
+  try {
+    const live = await fetchMemberDetailFromCongress(c.env, apiKey, bioguideId);
+    if (!live.ok) {
+      return c.json({ error: `Congress API: ${live.status}` }, 502);
+    }
+    return c.json(live.data, 200, { "Cache-Control": "public, max-age=3600" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
@@ -1771,6 +2172,13 @@ congress.get("/votes", async (c) => {
       const { data, count, error } = await query;
 
       if (!error && data && data.length > 0) {
+        if (isRowSetStale(data, VOTES_CACHE_STALE_MS)) {
+          c.executionCtx.waitUntil(
+            refreshVoteListCache(c.env, apiKey, congress_num, chamber, limit, offset).catch(
+              () => undefined
+            )
+          );
+        }
         return c.json(
           {
             votes: data.map((row) => normalizeDbVote(row as Record<string, unknown>)),
@@ -1993,6 +2401,29 @@ congress.get("/votes/:congress/:chamber/:rollCallNumber", async (c) => {
   const sourceUrl = c.req.query("source_url")?.trim();
 
   const voteMeta = getVoteRouteMeta(chamber);
+
+  if (hasSupabase(c.env)) {
+    try {
+      const cached = await readVoteDetailFromSupabase(
+        c.env,
+        parseInt(cong, 10),
+        voteMeta.normalized,
+        parseInt(rollCallNumber, 10)
+      );
+      if (cached && cached.hasMembers) {
+        if (isTimestampStale(cached.updatedAt, VOTE_DETAIL_CACHE_STALE_MS)) {
+          c.executionCtx.waitUntil(
+            congressFetch(`/${voteMeta.pathPrefix}/${cong}/2/${rollCallNumber}`, apiKey)
+              .then(() => undefined)
+              .catch(() => undefined)
+          );
+        }
+        return c.json(cached.payload, 200, { "Cache-Control": "public, max-age=1800" });
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
 
   const sessions = requestedSession && /^(1|2)$/.test(requestedSession)
     ? [requestedSession, ...(requestedSession === "1" ? ["2"] : ["1"])]
@@ -2669,17 +3100,56 @@ congress.get("/bills/:congress/:type/:number", async (c) => {
 
   const { congress: cong, type, number } = c.req.param();
   const path = `/bill/${cong}/${type}/${number}`;
+  const congressNum = Number.parseInt(cong, 10);
+  const billNumber = Number.parseInt(number, 10);
+  const normalizedType = type.toLowerCase();
+
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const { data, error } = await sb
+        .from("bill_details_cache")
+        .select("payload, updated_at")
+        .eq("congress", congressNum)
+        .eq("bill_type", normalizedType)
+        .eq("bill_number", billNumber)
+        .maybeSingle<{ payload: unknown; updated_at: string | null }>();
+      if (!error && data?.payload) {
+        if (isTimestampStale(data.updated_at, BILLS_CACHE_STALE_MS)) {
+          queueBillPayloadRefresh(
+            c.executionCtx,
+            c.env,
+            apiKey,
+            "bill_details_cache",
+            path,
+            congressNum,
+            normalizedType,
+            billNumber
+          );
+        }
+        return c.json(data.payload, 200, { "Cache-Control": "public, max-age=1800" });
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
 
   try {
-    const resp = await congressFetch(path, apiKey);
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
+    const live = await fetchBillPayloadAndCache(
+      c.env,
+      apiKey,
+      "bill_details_cache",
+      path,
+      congressNum,
+      normalizedType,
+      billNumber
+    );
+    if (!live.ok) {
+      return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
-    const data = (await resp.json()) as CongressBillDetailResponse;
+    const data = live.data as CongressBillDetailResponse;
 
     if (data.bill) {
-      const congressNum = Number.parseInt(cong, 10);
-      const billNumber = Number.parseInt(number, 10);
       const committeeNames = await fetchCongressBillCommittees(apiKey, congressNum, type, billNumber).catch(
         () => []
       );
@@ -2703,17 +3173,57 @@ congress.get("/bills/:congress/:type/:number/cosponsors", async (c) => {
   const { congress: cong, type, number } = c.req.param();
   const limit = parseBoundedInt(c.req.query("limit"), 50, 1, 250);
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
+  const congressNum = Number.parseInt(cong, 10);
+  const billNumber = Number.parseInt(number, 10);
+  const normalizedType = type.toLowerCase();
+  const params = { limit: String(limit), offset: String(offset) };
+
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const { data, error } = await sb
+        .from("bill_cosponsors_cache")
+        .select("payload, updated_at")
+        .eq("congress", congressNum)
+        .eq("bill_type", normalizedType)
+        .eq("bill_number", billNumber)
+        .maybeSingle<{ payload: unknown; updated_at: string | null }>();
+      if (!error && data?.payload) {
+        if (isTimestampStale(data.updated_at, BILLS_CACHE_STALE_MS)) {
+          queueBillPayloadRefresh(
+            c.executionCtx,
+            c.env,
+            apiKey,
+            "bill_cosponsors_cache",
+            `/bill/${cong}/${type}/${number}/cosponsors`,
+            congressNum,
+            normalizedType,
+            billNumber,
+            params
+          );
+        }
+        return c.json(data.payload, 200, { "Cache-Control": "public, max-age=1800" });
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
 
   try {
-    const resp = await congressFetch(`/bill/${cong}/${type}/${number}/cosponsors`, apiKey, {
-      limit: String(limit),
-      offset: String(offset),
-    });
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
+    const live = await fetchBillPayloadAndCache(
+      c.env,
+      apiKey,
+      "bill_cosponsors_cache",
+      `/bill/${cong}/${type}/${number}/cosponsors`,
+      congressNum,
+      normalizedType,
+      billNumber,
+      params
+    );
+    if (!live.ok) {
+      return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
-    const data: unknown = await resp.json();
-    return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
+    return c.json(live.data, 200, { "Cache-Control": "public, max-age=1800" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
@@ -2727,17 +3237,57 @@ congress.get("/bills/:congress/:type/:number/actions", async (c) => {
   const { congress: cong, type, number } = c.req.param();
   const limit = parseBoundedInt(c.req.query("limit"), 50, 1, 250);
   const offset = parseBoundedInt(c.req.query("offset"), 0, 0, 5000);
+  const congressNum = Number.parseInt(cong, 10);
+  const billNumber = Number.parseInt(number, 10);
+  const normalizedType = type.toLowerCase();
+  const params = { limit: String(limit), offset: String(offset) };
+
+  if (hasSupabase(c.env)) {
+    try {
+      const sb = getSupabase(c.env);
+      const { data, error } = await sb
+        .from("bill_actions_cache")
+        .select("payload, updated_at")
+        .eq("congress", congressNum)
+        .eq("bill_type", normalizedType)
+        .eq("bill_number", billNumber)
+        .maybeSingle<{ payload: unknown; updated_at: string | null }>();
+      if (!error && data?.payload) {
+        if (isTimestampStale(data.updated_at, BILLS_CACHE_STALE_MS)) {
+          queueBillPayloadRefresh(
+            c.executionCtx,
+            c.env,
+            apiKey,
+            "bill_actions_cache",
+            `/bill/${cong}/${type}/${number}/actions`,
+            congressNum,
+            normalizedType,
+            billNumber,
+            params
+          );
+        }
+        return c.json(data.payload, 200, { "Cache-Control": "public, max-age=1800" });
+      }
+    } catch {
+      // Fall through to live fetch.
+    }
+  }
 
   try {
-    const resp = await congressFetch(`/bill/${cong}/${type}/${number}/actions`, apiKey, {
-      limit: String(limit),
-      offset: String(offset),
-    });
-    if (!resp.ok) {
-      return c.json({ error: `Congress API: ${resp.status}` }, 502);
+    const live = await fetchBillPayloadAndCache(
+      c.env,
+      apiKey,
+      "bill_actions_cache",
+      `/bill/${cong}/${type}/${number}/actions`,
+      congressNum,
+      normalizedType,
+      billNumber,
+      params
+    );
+    if (!live.ok) {
+      return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
-    const data: unknown = await resp.json();
-    return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
+    return c.json(live.data, 200, { "Cache-Control": "public, max-age=1800" });
   } catch {
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
