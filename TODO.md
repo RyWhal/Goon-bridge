@@ -12,6 +12,11 @@
 - Keep surfacing the Worker 502 for debugging in the short term
 - Later cleanup: make the fallback path explicit in UI/dev logging so successful fallback does not look like a broken awards experience
 
+### Bill Cache Warming
+- Add a dedicated bill cache warming endpoint or script that paginates through Congress.gov bill lists and upserts rows into Supabase without blocking user requests
+- Start with the current congress, then backfill older congresses incrementally so filtered bill search can stay cache-first in production
+- Prefer resumable batching and progress checkpoints so warming can run within Cloudflare/Supabase free-tier limits
+
 ### Stock Prices Before and After Votes
 - Pull historical OHLCV data around vote dates (e.g. via Yahoo Finance, Polygon.io, or Alpha Vantage)
 - Define a window (e.g. T-5 to T+5 days around a vote) and measure price movement

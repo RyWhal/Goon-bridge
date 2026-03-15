@@ -13,6 +13,18 @@ export interface Database {
         Update: Partial<MembersInsert>;
         Relationships: [];
       };
+      member_congresses: {
+        Row: MemberCongressesRow;
+        Insert: MemberCongressesInsert;
+        Update: Partial<MemberCongressesInsert>;
+        Relationships: [];
+      };
+      member_details_cache: {
+        Row: MemberDetailsCacheRow;
+        Insert: MemberDetailsCacheInsert;
+        Update: Partial<MemberDetailsCacheInsert>;
+        Relationships: [];
+      };
       votes: {
         Row: VotesRow;
         Insert: VotesInsert;
@@ -35,6 +47,24 @@ export interface Database {
         Row: BillsRow;
         Insert: BillsInsert;
         Update: Partial<BillsInsert>;
+        Relationships: [];
+      };
+      bill_details_cache: {
+        Row: BillPayloadCacheRow;
+        Insert: BillPayloadCacheInsert;
+        Update: Partial<BillPayloadCacheInsert>;
+        Relationships: [];
+      };
+      bill_actions_cache: {
+        Row: BillPayloadCacheRow;
+        Insert: BillPayloadCacheInsert;
+        Update: Partial<BillPayloadCacheInsert>;
+        Relationships: [];
+      };
+      bill_cosponsors_cache: {
+        Row: BillPayloadCacheRow;
+        Insert: BillPayloadCacheInsert;
+        Update: Partial<BillPayloadCacheInsert>;
         Relationships: [];
       };
       fec_candidates: {
@@ -203,6 +233,42 @@ interface MembersInsert {
   updated_at?: string;
 }
 
+interface MemberCongressesRow {
+  bioguide_id: string;
+  congress: number;
+  name: string;
+  party: string | null;
+  state: string | null;
+  district: number | null;
+  chamber: string | null;
+  image_url: string | null;
+  updated_at: string;
+}
+
+interface MemberCongressesInsert {
+  bioguide_id: string;
+  congress: number;
+  name: string;
+  party?: string | null;
+  state?: string | null;
+  district?: number | null;
+  chamber?: string | null;
+  image_url?: string | null;
+  updated_at?: string;
+}
+
+interface MemberDetailsCacheRow {
+  bioguide_id: string;
+  payload: unknown;
+  updated_at: string;
+}
+
+interface MemberDetailsCacheInsert {
+  bioguide_id: string;
+  payload: unknown;
+  updated_at?: string;
+}
+
 interface VotesRow {
   id: number;
   congress: number;
@@ -334,6 +400,22 @@ interface BillsInsert {
   bill_status?: string | null;
   bill_status_label?: string | null;
   bill_status_step?: number | null;
+  updated_at?: string;
+}
+
+interface BillPayloadCacheRow {
+  congress: number;
+  bill_type: string;
+  bill_number: number;
+  payload: unknown;
+  updated_at: string;
+}
+
+interface BillPayloadCacheInsert {
+  congress: number;
+  bill_type: string;
+  bill_number: number;
+  payload: unknown;
   updated_at?: string;
 }
 
