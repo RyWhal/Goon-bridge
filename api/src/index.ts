@@ -14,6 +14,7 @@ import { lunar } from "./apis/lunar";
 import { correlation } from "./apis/correlation";
 import { disclosures } from "./apis/disclosures";
 import { getSupabase } from "./lib/supabase";
+import { BUILD_INFO } from "./build-info.generated";
 
 const app = new Hono<Env>();
 
@@ -62,6 +63,12 @@ app.get("/api/health", async (c) => {
     service: "vibe-api",
     timestamp: new Date().toISOString(),
     environment: c.env.ENVIRONMENT ?? "unknown",
+    version: {
+      version: BUILD_INFO.version,
+      commit: BUILD_INFO.commit,
+      deployed_at: BUILD_INFO.builtAt,
+      version_id: `${BUILD_INFO.version}+${BUILD_INFO.commit}`,
+    },
     apis: {
       congress: !!c.env.CONGRESS_API_KEY,
       openfec: !!c.env.OPENFEC_API_KEY,

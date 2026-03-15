@@ -4,7 +4,13 @@ import { useApi } from "../hooks/useApi";
 interface HealthResponse {
   status: string;
   service: string;
-  apis: Record<string, boolean>;
+  apis: Record<string, boolean | string>;
+  version?: {
+    version: string;
+    commit: string;
+    deployed_at: string;
+    version_id: string;
+  };
 }
 
 export function HealthCheck() {
@@ -31,16 +37,24 @@ export function HealthCheck() {
   }
 
   if (data) {
-    const apiCount = Object.values(data.apis).filter(Boolean).length;
+    const apiCount = Object.values(data.apis).filter((value) => value === true).length;
     const total = Object.values(data.apis).length;
+    const versionLabel = data.version
+      ? `${data.version.version}+${data.version.commit.slice(0, 7)}`
+      : null;
     return (
       <span
         className="text-xs text-vibe-yea"
-        title={Object.entries(data.apis)
-          .map(([k, v]) => `${k}: ${v ? "ready" : "no key"}`)
+        title={[
+          data.version
+            ? `version: ${data.version.version_id}\ndeployed: ${data.version.deployed_at}`
+            : null,
+          ...Object.entries(data.apis).map(([k, v]) => `${k}: ${typeof v === "string" ? v : v ? "ready" : "no key"}`),
+        ]
+          .filter(Boolean)
           .join("\n")}
       >
-        {apiCount}/{total} APIs ready
+        {apiCount}/{total} APIs ready{versionLabel ? ` · ${versionLabel}` : ""}
       </span>
     );
   }

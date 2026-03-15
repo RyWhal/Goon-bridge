@@ -28,20 +28,28 @@ interface ContributionPagination {
 }
 
 interface ContributionResult {
+  candidate_id?: string;
   contributor_name?: string;
   contributor_employer?: string;
   contributor_occupation?: string;
   contributor_state?: string;
   contribution_receipt_amount?: number;
   contribution_receipt_date?: string;
+  committee_id?: string;
   committee?: { name?: string };
   candidate_name?: string;
   recipient_name?: string;
+  recipient_organization_id?: number;
+  pdf_url?: string;
 }
 
 interface ContributionSearchResponse {
   results?: ContributionResult[];
   pagination?: ContributionPagination;
+  query_context?: {
+    source?: string;
+    pagination_mode?: "cursor" | "offset";
+  };
 }
 
 interface SummaryDonationPoint {
@@ -153,6 +161,7 @@ export function FecSearch() {
   const [candidateQuery, setCandidateQuery] = useState("");
   const [employer, setEmployer] = useState("");
   const [contributorName, setContributorName] = useState("");
+  const [recipientName, setRecipientName] = useState("");
   const [minAmount, setMinAmount] = useState("");
   const [maxAmount, setMaxAmount] = useState("");
   const [state, setState] = useState("");
@@ -211,11 +220,13 @@ export function FecSearch() {
   };
 
   const fetchContributionsPage = (page: number) => {
+    const paginationMode = contributions.data?.query_context?.pagination_mode ?? "cursor";
     let cursor = page > 1 ? contributionsCursors[page] ?? null : null;
 
     // If we're moving forward one page and haven't stored the cursor yet,
     // use the current response's last_indexes directly.
     if (
+      paginationMode === "cursor" &&
       !cursor &&
       page > 1 &&
       contributions.data?.pagination?.page === page - 1
@@ -223,7 +234,7 @@ export function FecSearch() {
       cursor = cursorFromLastIndexes(contributions.data.pagination.last_indexes);
     }
 
-    if (page > 1 && !cursor) return;
+    if (paginationMode === "cursor" && page > 1 && !cursor) return;
 
     setContributionsPage(page);
     const params = new URLSearchParams({
@@ -241,6 +252,7 @@ export function FecSearch() {
     if (cursor?.sort_null_only) params.set("sort_null_only", cursor.sort_null_only);
     if (employer) params.set("employer", employer);
     if (contributorName) params.set("contributor_name", contributorName);
+    if (recipientName) params.set("recipient_name", recipientName);
     if (minAmount) params.set("min_amount", minAmount);
     if (maxAmount) params.set("max_amount", maxAmount);
     if (state) params.set("state", state);
@@ -251,6 +263,19 @@ export function FecSearch() {
   const searchContributions = () => {
     setContributionsCursors({ 1: null });
     fetchContributionsPage(1);
+  };
+
+  const openContributionRecipientCandidate = (contribution: ContributionResult) => {
+    if (!contribution.candidate_id) return;
+    setMode("candidates");
+    handleCandidateClick({
+      candidate_id: contribution.candidate_id,
+      name:
+        contribution.candidate_name ??
+        contribution.recipient_name ??
+        contribution.committee?.name ??
+        "Candidate committee",
+    });
   };
 
   const handleCandidateClick = (c: CandidateResult) => {
@@ -364,11 +389,13 @@ export function FecSearch() {
 
   const contributionsCurrentPage = contributions.data?.pagination?.page ?? contributionsPage;
   const contributionsTotalPages = contributions.data?.pagination?.pages ?? 1;
+  const contributionsPaginationMode = contributions.data?.query_context?.pagination_mode ?? "cursor";
   const contributionsNextCursor =
     contributionsCursors[contributionsCurrentPage + 1] ??
     cursorFromLastIndexes(contributions.data?.pagination?.last_indexes);
   const contributionsNextDisabled =
-    contributionsCurrentPage >= contributionsTotalPages || !contributionsNextCursor;
+    contributionsCurrentPage >= contributionsTotalPages ||
+    (contributionsPaginationMode === "cursor" && !contributionsNextCursor);
 
   return (
     <div className="space-y-4">
@@ -465,6 +492,14 @@ export function FecSearch() {
               />
             </div>
             <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                className="input flex-1"
+                placeholder="To: candidate / committee / PAC..."
+                value={recipientName}
+                onChange={(e) => setRecipientName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && searchContributions()}
+              />
               <input
                 type="text"
                 className="input flex-1"
@@ -801,6 +836,15 @@ export function FecSearch() {
           />
           {contributionResults.map((c, i) => (
             <div key={i} className="card">
+              {(() => {
+                const recipientLabel =
+                  c.recipient_name ?? c.committee?.name ?? c.candidate_name ?? "Unknown recipient";
+                const recipientCanOpenCandidate = !!c.candidate_id;
+                const recipientDiffersFromCandidate =
+                  !!c.candidate_name &&
+                  c.candidate_name.trim() !== recipientLabel.trim();
+
+                return (
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{c.contributor_name}</p>
@@ -811,9 +855,28 @@ export function FecSearch() {
                       : ""}
                     {c.contributor_state ? ` | ${c.contributor_state}` : ""}
                   </p>
-                  {(c.committee?.name || c.candidate_name || c.recipient_name) && (
+                  {recipientLabel && (
                     <p className="text-xs text-vibe-dim mt-0.5">
-                      To: {c.committee?.name ?? c.candidate_name ?? c.recipient_name}
+                      To:{" "}
+                      {recipientCanOpenCandidate ? (
+                        <button
+                          type="button"
+                          className="hover:text-vibe-text hover:underline underline-offset-2"
+                          onClick={() => openContributionRecipientCandidate(c)}
+                        >
+                          {recipientLabel}
+                        </button>
+                      ) : (
+                        <span>{recipientLabel}</span>
+                      )}
+                      {recipientDiffersFromCandidate ? ` (${c.candidate_name})` : ""}
+                    </p>
+                  )}
+                  {(c.committee_id || c.recipient_organization_id) && (
+                    <p className="text-[11px] text-vibe-dim mt-1">
+                      {c.committee_id ? `Committee ID: ${c.committee_id}` : ""}
+                      {c.committee_id && c.recipient_organization_id ? " · " : ""}
+                      {c.recipient_organization_id ? "Tracked recipient identity" : ""}
                     </p>
                   )}
                 </div>
@@ -825,8 +888,20 @@ export function FecSearch() {
                   <p className="text-xs text-vibe-dim">
                     {c.contribution_receipt_date}
                   </p>
+                  {c.pdf_url && (
+                    <a
+                      href={c.pdf_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-vibe-accent hover:underline block mt-1"
+                    >
+                      Evidence PDF
+                    </a>
+                  )}
                 </div>
               </div>
+                );
+              })()}
             </div>
           ))}
           <JsonViewer data={contributions.data} label="Full API Response" />

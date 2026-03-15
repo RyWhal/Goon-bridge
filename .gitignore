@@ -29,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated worker build metadata
+api/src/build-info.generated.ts
