@@ -72,6 +72,17 @@ function voteKey(v: VoteItem) {
   return `${v.congress}-${v.chamber}-${v.rollCallNumber}`;
 }
 
+function sortVotesByDate(votes: VoteItem[]) {
+  return [...votes].sort((left, right) => {
+    const leftDate = left.date ?? "";
+    const rightDate = right.date ?? "";
+    const dateComparison = rightDate.localeCompare(leftDate);
+    if (dateComparison !== 0) return dateComparison;
+
+    return String(right.rollCallNumber ?? "").localeCompare(String(left.rollCallNumber ?? ""));
+  });
+}
+
 export function VoteSearch() {
   const [congress, setCongress] = useState("119");
   const [chamber, setChamber] = useState("");
@@ -157,6 +168,7 @@ export function VoteSearch() {
   const allMembers = getMembersByPosition("all");
   const filteredMembers = getMembersByPosition(memberFilter);
   const hasMembers = allMembers.length > 0;
+  const displayedVotes = sortVotesByDate(list.data?.votes ?? []);
 
   return (
     <div className="space-y-4">
@@ -223,7 +235,7 @@ export function VoteSearch() {
 
       {list.data?.votes && list.data.votes.length > 0 && (
         <div className="space-y-2">
-          {list.data.votes.map((v, i) => {
+          {displayedVotes.map((v, i) => {
             const key = voteKey(v);
             const isExpanded = expandedKey === key;
             const totals = isExpanded ? getTotals() : null;
