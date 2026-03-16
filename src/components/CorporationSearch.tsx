@@ -417,12 +417,12 @@ export function CorporationSearch() {
                         </div>
 
                         {/* Issue areas */}
-                        {record.issues.length > 0 && (
+                        {(record.issues?.length ?? 0) > 0 && (
                           <div className="border-t border-vibe-border pt-2 space-y-1">
                             <p className="text-xs font-semibold uppercase tracking-wider text-vibe-dim">
                               Issue Areas
                             </p>
-                            {record.issues.map((issue, i) => (
+                            {(record.issues ?? []).map((issue, i) => (
                               <div key={i} className="rounded bg-vibe-surface px-2 py-1">
                                 {issue.code && (
                                   <span className="badge bg-vibe-accent/20 text-vibe-accent mr-2">
@@ -438,13 +438,13 @@ export function CorporationSearch() {
                         )}
 
                         {/* Lobbyists */}
-                        {record.lobbyists.length > 0 && (
+                        {(record.lobbyists?.length ?? 0) > 0 && (
                           <div className="border-t border-vibe-border pt-2 space-y-1">
                             <p className="text-xs font-semibold uppercase tracking-wider text-vibe-dim">
                               Lobbyists
                             </p>
                             <div className="grid gap-1 sm:grid-cols-2">
-                              {record.lobbyists.map((lobbyist, i) => {
+                              {(record.lobbyists ?? []).map((lobbyist, i) => {
                                 const fullName = [lobbyist.firstName, lobbyist.lastName]
                                   .filter(Boolean)
                                   .join(" ");
