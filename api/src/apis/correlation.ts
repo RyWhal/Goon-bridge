@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import type { Env } from "../types";
 import type { MemberVoteStats } from "../lib/member-votes";
 import { getSupabase } from "../lib/supabase";
+import { requireAdminAuth } from "../middleware/admin-auth";
 import {
   fetchOfficialCommitteeAssignments,
   materializeMemberRelationships,
@@ -11,6 +12,9 @@ import {
 } from "../lib/relationships";
 
 const correlation = new Hono<Env>();
+
+// All POST (mutation) routes require admin authentication
+correlation.use("/refresh/*", requireAdminAuth);
 
 function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);

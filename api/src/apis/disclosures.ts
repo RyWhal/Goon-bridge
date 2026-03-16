@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { getSupabase } from "../lib/supabase";
+import { requireAdminAuth } from "../middleware/admin-auth";
 import {
   normalizeDisclosureTradesForFiling,
   refreshHouseDisclosures,
@@ -8,6 +9,11 @@ import {
 } from "../lib/disclosures";
 
 const disclosures = new Hono<Env>();
+
+// All POST (mutation) routes require admin authentication
+disclosures.use("/refresh/*", requireAdminAuth);
+disclosures.use("/backfill", requireAdminAuth);
+disclosures.use("/normalize/*", requireAdminAuth);
 
 function hasSupabase(env: Env["Bindings"]): boolean {
   return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);

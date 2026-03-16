@@ -6,6 +6,14 @@ import { getSupabase } from "../lib/supabase";
 const congress = new Hono<Env>();
 
 const BASE = "https://api.congress.gov/v3";
+const CONGRESS_FETCH_TIMEOUT_MS = 15_000;
+
+class CongressTimeoutError extends Error {
+  constructor(message = "Congress API request timed out") {
+    super(message);
+    this.name = "CongressTimeoutError";
+  }
+}
 
 async function congressFetch(
   path: string,
@@ -20,7 +28,22 @@ async function congressFetch(
       url.searchParams.set(k, v);
     }
   }
-  return fetch(url.toString());
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONGRESS_FETCH_TIMEOUT_MS);
+
+  try {
+    return await fetch(url.toString(), { signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new CongressTimeoutError(
+        `Congress API request timed out after ${CONGRESS_FETCH_TIMEOUT_MS}ms`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**
@@ -2013,7 +2036,10 @@ congress.get("/members", async (c) => {
   try {
     const live = await fetchMembersFromCongress(c.env, apiKey, currentCongress, limit, offset);
     return c.json(live, 200, { "Cache-Control": "public, max-age=3600" });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -2082,7 +2108,10 @@ congress.get("/members/search", async (c) => {
     return c.json({ members: filtered, count: filtered.length }, 200, {
       "Cache-Control": "public, max-age=3600",
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -2215,7 +2244,10 @@ congress.get("/members/browse", async (c) => {
       200,
       { "Cache-Control": "public, max-age=60, stale-while-revalidate=300" }
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -2252,7 +2284,10 @@ congress.get("/members/:bioguideId", async (c) => {
       return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
     return c.json(live.data, 200, { "Cache-Control": "public, max-age=3600" });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -2507,6 +2542,9 @@ congress.get("/votes", async (c) => {
       { "Cache-Control": "public, max-age=1800" }
     );
   } catch (e) {
+    if (e instanceof CongressTimeoutError) {
+      return c.json({ error: e.message }, 504);
+    }
     return c.json(
       {
         error: "Failed to fetch from Congress API",
@@ -3478,6 +3516,9 @@ congress.get("/bills", async (c) => {
       { "Cache-Control": "public, max-age=600" }
     );
   } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     console.error("Congress bills fetch failed", {
       congress: congress_num,
       billType,
@@ -3557,7 +3598,10 @@ congress.get("/bills/:congress/:type/:number", async (c) => {
     }
 
     return c.json(data, 200, { "Cache-Control": "public, max-age=1800" });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -3621,7 +3665,10 @@ congress.get("/bills/:congress/:type/:number/cosponsors", async (c) => {
       return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
     return c.json(live.data, 200, { "Cache-Control": "public, max-age=1800" });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });
@@ -3685,7 +3732,10 @@ congress.get("/bills/:congress/:type/:number/actions", async (c) => {
       return c.json({ error: `Congress API: ${live.status}` }, 502);
     }
     return c.json(live.data, 200, { "Cache-Control": "public, max-age=1800" });
-  } catch {
+  } catch (error) {
+    if (error instanceof CongressTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
   }
 });

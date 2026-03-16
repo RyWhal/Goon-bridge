@@ -4,7 +4,6 @@ import { MemberSearch } from "./components/MemberSearch";
 import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
 import { CorporationSearch } from "./components/CorporationSearch";
-import { ContextLookup } from "./components/ContextLookup";
 import { CorrelationExplorer } from "./components/CorrelationExplorer";
 import { StockTradeExplorer } from "./components/StockTradeExplorer";
 
@@ -20,7 +19,7 @@ const EXPERIMENTAL_TABS = [
   { id: "trades", label: "Stock Trades" },
 ] as const;
 
-type MainTabId = (typeof MAIN_TABS)[number]["id"] | "context";
+type MainTabId = (typeof MAIN_TABS)[number]["id"];
 type ExperimentalTabId = (typeof EXPERIMENTAL_TABS)[number]["id"];
 type Theme = "dark" | "light";
 type RouteState =
@@ -187,7 +186,6 @@ export default function App() {
         {route.page === "main" && route.tab === "bills" && <BillSearch />}
         {route.page === "main" && route.tab === "money" && <FecSearch />}
         {route.page === "main" && route.tab === "corporations" && <CorporationSearch />}
-        {route.page === "main" && route.tab === "context" && <ContextLookup />}
         {route.page === "experimental" && route.tab === "correlations" && <CorrelationExplorer />}
         {route.page === "experimental" && route.tab === "trades" && <StockTradeExplorer />}
       </main>
