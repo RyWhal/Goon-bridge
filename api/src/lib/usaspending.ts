@@ -1,21 +1,25 @@
 const CONTRACT_AWARD_TYPE_CODES = ["A", "B", "C", "D"];
+
+// Full field set using USAspending's documented human-readable field names
 const AWARD_SEARCH_FIELDS = [
   "Award ID",
   "Recipient Name",
   "Award Amount",
   "Base Obligation Date",
-  "Start Date",
-  "End Date",
+  "Period of Performance Start Date",
+  "Period of Performance Current End Date",
   "Awarding Agency",
   "Awarding Sub Agency",
   "Contract Award Type",
   "Description",
-  "pop_city_name",
-  "pop_state_code",
+  "Place of Performance City Name",
+  "Place of Performance State Code",
   "Place of Performance Zip5",
-  "naics_code",
+  "NAICS Code",
   "generated_internal_id",
 ];
+
+// Minimal field set — used as a fallback when the full set triggers server errors
 const AWARD_SEARCH_MINIMAL_FIELDS = [
   "Award ID",
   "Recipient Name",
@@ -138,34 +142,32 @@ export function buildAwardSearchBodies(params: {
     ...(params.recipientSearchTerms ?? []),
   ].filter((term, index, items): term is string => !!term && items.indexOf(term) === index);
 
-  return searchTerms.map((term) => ({
-    filters: {
-      recipient_search_text: [term],
-      time_period: [{ start_date: params.from, end_date: params.to }],
-      award_type_codes: CONTRACT_AWARD_TYPE_CODES,
-    },
-  })).flatMap((filters) => [
-    {
-      ...baseBody,
-      ...filters,
-    },
-    {
-      fields: AWARD_SEARCH_FIELDS,
-      page: 1,
-      limit: Math.min(limit, 50),
-      sort: "Base Obligation Date",
-      order: "desc",
-      ...filters,
-    },
-    {
-      fields: AWARD_SEARCH_MINIMAL_FIELDS,
-      page: 1,
-      limit: Math.min(limit, 25),
-      sort: "Base Obligation Date",
-      order: "desc",
-      ...filters,
-    },
-  ]);
+  // For each search term, try minimal fields first (most reliable), then full fields.
+  // Smaller limits reduce the chance of USAspending returning a server-side 502.
+  return searchTerms.flatMap((term) => {
+    const filters = {
+      filters: {
+        recipient_search_text: [term],
+        time_period: [{ start_date: params.from, end_date: params.to }],
+        award_type_codes: CONTRACT_AWARD_TYPE_CODES,
+      },
+    };
+    return [
+      {
+        fields: AWARD_SEARCH_MINIMAL_FIELDS,
+        page: 1,
+        limit: Math.min(limit, 25),
+        sort: "Base Obligation Date",
+        order: "desc",
+        ...filters,
+      },
+      {
+        ...baseBody,
+        limit: Math.min(limit, 50),
+        ...filters,
+      },
+    ];
+  });
 }
 
 function coalesceString(record: Record<string, unknown>, keys: string[]): string | null {
@@ -333,19 +335,19 @@ export function normalizeAwardSearchResults(
       country: null,
       totalValue: asNumber(item["Award Amount"]),
       actionDate: asString(item["Base Obligation Date"]),
-      performanceStartDate: asString(item["Start Date"]),
-      performanceEndDate: asString(item["End Date"]),
+      performanceStartDate: asString(item["Period of Performance Start Date"]),
+      performanceEndDate: asString(item["Period of Performance Current End Date"]),
       awardingAgencyName: asString(item["Awarding Agency"]),
       awardingSubAgencyName: asString(item["Awarding Sub Agency"]),
       awardingOfficeName: null,
       performanceCountry: null,
-      performanceCity: asString(item["pop_city_name"]),
+      performanceCity: asString(item["Place of Performance City Name"]),
       performanceCounty: null,
-      performanceState: asString(item["pop_state_code"]),
+      performanceState: asString(item["Place of Performance State Code"]),
       performanceZipCode: asString(item["Place of Performance Zip5"]),
       performanceCongressionalDistrict: null,
       awardDescription: asString(item["Description"]),
-      naicsCode: asString(item["naics_code"]),
+      naicsCode: asString(item["NAICS Code"]),
       permalink: makeAwardUrl(asString(item["generated_internal_id"])),
       awardId: asString(item["Award ID"]),
       awardType: asString(item["Contract Award Type"]),
