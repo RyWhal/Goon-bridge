@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 import {
@@ -41,6 +41,17 @@ interface LobbyingResult {
   chamberLabel: string;
   issues: LobbyingIssue[];
   lobbyists: LobbyingLobbyist[];
+}
+
+interface LdaActivity {
+  generalIssueAreaCode: string | null;
+  specificIssues: string | null;
+  lobbyists: LobbyingLobbyist[];
+}
+
+interface LdaFilingDetail {
+  uuid: string;
+  activities: LdaActivity[];
 }
 
 interface LobbyingSearchResponse {
@@ -107,6 +118,8 @@ export function CorporationSearch() {
   const [lobbyingPage, setLobbyingPage] = useState(1);
   const [spendingPage, setSpendingPage] = useState(1);
   const [activeSubTab, setActiveSubTab] = useState<CorporateSubTab>("lobbying");
+  const [ldaByUuid, setLdaByUuid] = useState<Map<string, LdaFilingDetail>>(new Map());
+  const fetchingUuids = useRef<Set<string>>(new Set());
   const symbolLookup = useApi<SymbolLookupResponse>();
   const lobbying = useApi<LobbyingSearchResponse>();
   const spending = useApi<UsaSpendingAwardSearchResponse>();
@@ -222,6 +235,41 @@ export function CorporationSearch() {
     (lobbyingPage - 1) * PAGE_SIZE,
     lobbyingPage * PAGE_SIZE
   );
+
+  // Fetch Senate LDA details for each visible lobbying filing that has a UUID.
+  // Results are cached in ldaByUuid; fetchingUuids prevents duplicate requests.
+  useEffect(() => {
+    const uuids = visibleLobbyingResults
+      .map((r) => r.uuid)
+      .filter((uuid): uuid is string => !!uuid && !ldaByUuid.has(uuid) && !fetchingUuids.current.has(uuid));
+
+    if (uuids.length === 0) return;
+
+    uuids.forEach((uuid) => fetchingUuids.current.add(uuid));
+
+    Promise.allSettled(
+      uuids.map((uuid) =>
+        fetch(`/api/lda/filing?uuid=${encodeURIComponent(uuid)}`)
+          .then((r) => (r.ok ? (r.json() as Promise<LdaFilingDetail>) : null))
+          .catch(() => null)
+      )
+    ).then((results) => {
+      setLdaByUuid((prev) => {
+        const next = new Map(prev);
+        results.forEach((result, i) => {
+          const uuid = uuids[i];
+          if (result.status === "fulfilled" && result.value) {
+            next.set(uuid, result.value);
+          }
+          fetchingUuids.current.delete(uuid);
+        });
+        return next;
+      });
+    });
+  // visibleLobbyingResults identity changes on every page turn; that's the desired trigger
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleLobbyingResults]);
+
   const spendingResults = spending.data?.data ?? [];
   const spendingTotalPages = Math.max(1, Math.ceil(spendingResults.length / PAGE_SIZE));
   const visibleSpendingResults = spendingResults.slice(
@@ -416,54 +464,59 @@ export function CorporationSearch() {
                           </div>
                         </div>
 
-                        {/* Issue areas */}
-                        {(record.issues?.length ?? 0) > 0 && (
-                          <div className="border-t border-vibe-border pt-2 space-y-1">
-                            <p className="text-xs font-semibold uppercase tracking-wider text-vibe-dim">
-                              Issue Areas
-                            </p>
-                            {(record.issues ?? []).map((issue, i) => (
-                              <div key={i} className="rounded bg-vibe-surface px-2 py-1">
-                                {issue.code && (
-                                  <span className="badge bg-vibe-accent/20 text-vibe-accent mr-2">
-                                    {issue.code}
-                                  </span>
-                                )}
-                                {issue.specificIssue && (
-                                  <span className="text-xs text-vibe-text">{issue.specificIssue}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {/* Lobbyists */}
-                        {(record.lobbyists?.length ?? 0) > 0 && (
-                          <div className="border-t border-vibe-border pt-2 space-y-1">
-                            <p className="text-xs font-semibold uppercase tracking-wider text-vibe-dim">
-                              Lobbyists
-                            </p>
-                            <div className="grid gap-1 sm:grid-cols-2">
-                              {(record.lobbyists ?? []).map((lobbyist, i) => {
-                                const fullName = [lobbyist.firstName, lobbyist.lastName]
-                                  .filter(Boolean)
-                                  .join(" ");
-                                return (
-                                  <div key={i} className="rounded bg-vibe-surface px-2 py-1">
-                                    <p className="text-xs font-medium text-vibe-text">
-                                      {fullName || "Unknown"}
-                                    </p>
-                                    {lobbyist.coveredOfficialPosition && (
-                                      <p className="text-xs text-vibe-dim mt-0.5">
-                                        {lobbyist.coveredOfficialPosition}
-                                      </p>
+                        {/* Senate LDA detail: issue areas + lobbyists */}
+                        {record.uuid && (() => {
+                          const lda = ldaByUuid.get(record.uuid);
+                          if (!lda) {
+                            return (
+                              <p className="text-xs text-vibe-dim border-t border-vibe-border pt-2">
+                                Loading issue areas &amp; lobbyists…
+                              </p>
+                            );
+                          }
+                          if (lda.activities.length === 0) return null;
+                          return (
+                            <div className="border-t border-vibe-border pt-2 space-y-3">
+                              {lda.activities.map((activity, ai) => (
+                                <div key={ai} className="space-y-1">
+                                  {/* Issue area header */}
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {activity.generalIssueAreaCode && (
+                                      <span className="badge bg-vibe-accent/20 text-vibe-accent">
+                                        {activity.generalIssueAreaCode}
+                                      </span>
+                                    )}
+                                    {activity.specificIssues && (
+                                      <p className="text-xs text-vibe-text">{activity.specificIssues}</p>
                                     )}
                                   </div>
-                                );
-                              })}
+                                  {/* Lobbyists for this issue area */}
+                                  {activity.lobbyists.length > 0 && (
+                                    <div className="grid gap-1 sm:grid-cols-2">
+                                      {activity.lobbyists.map((lobbyist, li) => {
+                                        const fullName = [lobbyist.firstName, lobbyist.lastName]
+                                          .filter(Boolean)
+                                          .join(" ");
+                                        return (
+                                          <div key={li} className="rounded bg-vibe-surface px-2 py-1">
+                                            <p className="text-xs font-medium text-vibe-text">
+                                              {fullName || "Unknown"}
+                                            </p>
+                                            {lobbyist.coveredOfficialPosition && (
+                                              <p className="text-xs text-vibe-dim mt-0.5">
+                                                {lobbyist.coveredOfficialPosition}
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
                             </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     ))
                   )}
