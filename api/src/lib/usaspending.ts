@@ -1,4 +1,3 @@
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CONTRACT_AWARD_TYPE_CODES = ["A", "B", "C", "D"];
 const AWARD_SEARCH_FIELDS = [
   "Award ID",
@@ -51,11 +50,7 @@ export type UsaSpendingRecipientCandidate = {
   raw: Record<string, unknown>;
 };
 
-export function isValidDate(value: string | undefined): value is string {
-  if (!value || !DATE_RE.test(value)) return false;
-  const parsed = Date.parse(`${value}T00:00:00Z`);
-  return Number.isFinite(parsed);
-}
+export { isValidDate } from "./validation";
 
 export function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;

@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { getSupabase } from "../lib/supabase";
 import { ensureOrganization, normalizeOrganizationName } from "../lib/relationships";
+import { FetchTimeoutError, fetchWithTimeout } from "../lib/fetch-with-timeout";
+import { readErrorDetail } from "../lib/error-utils";
+import { hasSupabase } from "../lib/validation";
 
 const openfec = new Hono<Env>();
 
@@ -15,13 +18,6 @@ const SUMMARY_REFRESH_MIN_INTERVAL_MS = 60 * 1000;
 const SUMMARY_REFRESH_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const summaryRefreshInFlight = new Set<string>();
 const summaryRefreshCooldownUntil = new Map<string, number>();
-
-class FecTimeoutError extends Error {
-  constructor(message = "OpenFEC request timed out") {
-    super(message);
-    this.name = "FecTimeoutError";
-  }
-}
 
 class FecUpstreamError extends Error {
   status: number;
@@ -147,10 +143,6 @@ interface CandidateSummaryCacheRow {
   updated_at: string | null;
 }
 
-function hasSupabase(env: Env["Bindings"]): boolean {
-  return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
-}
-
 async function fecFetch(
   path: string,
   apiKey: string,
@@ -165,43 +157,7 @@ async function fecFetch(
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url.toString(), { signal: controller.signal });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new FecTimeoutError(`OpenFEC request timed out after ${timeoutMs}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-
-async function readFecErrorDetails(resp: Response): Promise<string | null> {
-  const raw = await resp.text().catch(() => "");
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw) as {
-      error?: string;
-      message?: string;
-      detail?: string;
-      [key: string]: unknown;
-    };
-
-    const reason =
-      parsed.error ?? parsed.message ?? parsed.detail ?? (typeof parsed === "object" ? JSON.stringify(parsed) : null);
-
-    if (!reason) return null;
-    return String(reason).slice(0, 300);
-  } catch {
-    const snippet = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-    return snippet ? snippet.slice(0, 300) : null;
-  }
+  return fetchWithTimeout(url.toString(), timeoutMs);
 }
 
 async function resolveCandidateCommitteeId(
@@ -665,7 +621,7 @@ async function buildCandidateContributionSummaryFromOpenFec(
   const upstreamFailure = upstreamChecks.find(({ resp }) => !resp.ok);
 
   if (upstreamFailure) {
-    const upstreamDetail = await readFecErrorDetails(upstreamFailure.resp);
+    const upstreamDetail = await readErrorDetail(upstreamFailure.resp);
     throw new FecUpstreamError(
       `OpenFEC summary query failed (${upstreamFailure.label})`,
       upstreamFailure.resp.status,
@@ -1445,7 +1401,7 @@ openfec.get("/contributions", async (c) => {
       const liveResp = await fecFetch("/schedules/schedule_a/", apiKey, liveParams);
 
       if (!liveResp.ok) {
-        const upstreamDetail = await readFecErrorDetails(liveResp);
+        const upstreamDetail = await readErrorDetail(liveResp);
         return c.json({
           error: `FEC API ${liveResp.status}${upstreamDetail ? `: ${upstreamDetail}` : ""}`,
           detail: upstreamDetail,
@@ -1503,7 +1459,7 @@ openfec.get("/contributions", async (c) => {
         },
       }, 200, { "Cache-Control": "no-store" });
     } catch (error) {
-      if (error instanceof FecTimeoutError) {
+      if (error instanceof FetchTimeoutError) {
         return c.json({
           error: "OpenFEC request timed out",
           detail: "Candidate contribution lookup took too long; try again shortly.",
@@ -1705,7 +1661,7 @@ openfec.get("/contributions", async (c) => {
       resp = await fecFetch(endpoint, apiKey, params);
     } catch (error) {
       const shouldRetryWithDateSort =
-        error instanceof FecTimeoutError &&
+        error instanceof FetchTimeoutError &&
         !candidateId &&
         !committeeId &&
         sortApplied.includes("contribution_receipt_amount");
@@ -1721,7 +1677,7 @@ openfec.get("/contributions", async (c) => {
     }
 
     if (!resp.ok) {
-      const upstreamDetail = await readFecErrorDetails(resp);
+      const upstreamDetail = await readErrorDetail(resp);
       const debugParams = Object.fromEntries(
         Object.entries(params).filter(([key]) =>
           [
@@ -1831,7 +1787,7 @@ openfec.get("/contributions", async (c) => {
       },
     }, 200, { "Cache-Control": "no-store" });
   } catch (error) {
-    if (error instanceof FecTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json({
         error: "OpenFEC request timed out",
         detail: "The contribution search took too long. Try narrowing filters or retry shortly.",
@@ -2084,7 +2040,7 @@ openfec.get("/candidates/:candidateId/summary", async (c) => {
     );
     return c.json(response, 200, { "Cache-Control": "public, max-age=300" });
   } catch (error) {
-    if (error instanceof FecTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json(
         {
           error: "OpenFEC request timed out",
