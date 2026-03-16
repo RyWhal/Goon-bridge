@@ -1,18 +1,13 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
+import { FetchTimeoutError, fetchWithTimeout } from "../lib/fetch-with-timeout";
+import { readErrorDetail } from "../lib/error-utils";
+import { isValidDate } from "../lib/validation";
 
 const finnhub = new Hono<Env>();
 
 const BASE = "https://finnhub.io/api/v1";
 const FINNHUB_FETCH_TIMEOUT_MS = 12_000;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-class FinnhubTimeoutError extends Error {
-  constructor(message = "Finnhub request timed out") {
-    super(message);
-    this.name = "FinnhubTimeoutError";
-  }
-}
 
 interface FinnhubLobbyingRecord {
   symbol?: string | null;
@@ -53,43 +48,7 @@ async function finnhubFetch(
     url.searchParams.set(key, value);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FINNHUB_FETCH_TIMEOUT_MS);
-
-  try {
-    return await fetch(url.toString(), { signal: controller.signal });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new FinnhubTimeoutError(
-        `Finnhub request timed out after ${FINNHUB_FETCH_TIMEOUT_MS}ms`
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function readErrorDetail(resp: Response): Promise<string | null> {
-  const raw = await resp.text().catch(() => "");
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw) as {
-      error?: string;
-      message?: string;
-      detail?: string;
-    };
-    return parsed.error ?? parsed.message ?? parsed.detail ?? raw.slice(0, 300);
-  } catch {
-    return raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300) || null;
-  }
-}
-
-function isValidDate(value: string | undefined): value is string {
-  if (!value || !DATE_RE.test(value)) return false;
-  const parsed = Date.parse(`${value}T00:00:00Z`);
-  return Number.isFinite(parsed);
+  return fetchWithTimeout(url.toString(), FINNHUB_FETCH_TIMEOUT_MS);
 }
 
 function scoreSymbolMatch(query: string, item: FinnhubSymbolSearchResult): number {
@@ -165,7 +124,7 @@ finnhub.get("/symbol-lookup", async (c) => {
       { "Cache-Control": "public, max-age=21600" }
     );
   } catch (error) {
-    if (error instanceof FinnhubTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json({ error: error.message }, 504);
     }
 
@@ -270,7 +229,7 @@ finnhub.get("/lobbying", async (c) => {
       { "Cache-Control": "public, max-age=21600" }
     );
   } catch (error) {
-    if (error instanceof FinnhubTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json({ error: error.message }, 504);
     }
 

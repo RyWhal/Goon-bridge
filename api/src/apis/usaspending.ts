@@ -13,59 +13,22 @@ import {
   type UsaSpendingAwardSearchResponse,
   type UsaSpendingRecipientCandidate,
 } from "../lib/usaspending";
+import { FetchTimeoutError, fetchWithTimeout } from "../lib/fetch-with-timeout";
+import { readErrorDetail } from "../lib/error-utils";
 
 const usaspending = new Hono<Env>();
 
 const BASE = "https://api.usaspending.gov";
 const REQUEST_TIMEOUT_MS = 12_000;
 
-class UsaSpendingTimeoutError extends Error {
-  constructor(message = "USAspending request timed out") {
-    super(message);
-    this.name = "UsaSpendingTimeoutError";
-  }
-}
-
 async function usaspendingFetch(path: string, init?: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    return await fetch(`${BASE}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
-      },
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new UsaSpendingTimeoutError(
-        `USAspending request timed out after ${REQUEST_TIMEOUT_MS}ms`
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function readErrorDetail(resp: Response): Promise<string | null> {
-  const raw = await resp.text().catch(() => "");
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw) as {
-      detail?: string;
-      message?: string;
-      status?: string;
-      error?: string;
-    };
-    return parsed.detail ?? parsed.message ?? parsed.error ?? parsed.status ?? raw.slice(0, 300);
-  } catch {
-    return raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300) || null;
-  }
+  return fetchWithTimeout(`${BASE}${path}`, REQUEST_TIMEOUT_MS, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
 }
 
 async function searchAwards(
@@ -238,7 +201,7 @@ usaspending.get("/recipients/autocomplete", async (c) => {
       { "Cache-Control": "public, max-age=21600" }
     );
   } catch (error) {
-    if (error instanceof UsaSpendingTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json({ error: error.message }, 504);
     }
 
@@ -340,7 +303,7 @@ usaspending.get("/awards", async (c) => {
       to,
       detail: error instanceof Error ? error.message : String(error),
     });
-    if (error instanceof UsaSpendingTimeoutError) {
+    if (error instanceof FetchTimeoutError) {
       return c.json({ error: error.message }, 504);
     }
 

@@ -249,6 +249,27 @@ export function MemberSearch() {
 
         <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2 xl:gap-4">
           <div>
+            <p className="mb-1.5 text-[10px] text-vibe-dim uppercase tracking-wider">Chamber</p>
+            <div className="flex flex-wrap gap-1.5">
+              <FilterToggle
+                label="All"
+                active={chamberFilter === "all"}
+                onClick={() => setChamberFilter("all")}
+              />
+              <FilterToggle
+                label="House"
+                active={chamberFilter === "House"}
+                onClick={() => setChamberFilter("House")}
+              />
+              <FilterToggle
+                label="Senate"
+                active={chamberFilter === "Senate"}
+                onClick={() => setChamberFilter("Senate")}
+              />
+            </div>
+          </div>
+
+          <div>
             <p className="mb-1.5 text-[10px] text-vibe-dim uppercase tracking-wider">Party</p>
             <div className="flex flex-wrap gap-1.5">
               <FilterToggle
@@ -270,27 +291,6 @@ export function MemberSearch() {
                 label="Independents"
                 active={partyFilter === "I"}
                 onClick={() => setPartyFilter("I")}
-              />
-            </div>
-          </div>
-
-          <div>
-            <p className="mb-1.5 text-[10px] text-vibe-dim uppercase tracking-wider">Chamber</p>
-            <div className="flex flex-wrap gap-1.5">
-              <FilterToggle
-                label="All"
-                active={chamberFilter === "all"}
-                onClick={() => setChamberFilter("all")}
-              />
-              <FilterToggle
-                label="House"
-                active={chamberFilter === "House"}
-                onClick={() => setChamberFilter("House")}
-              />
-              <FilterToggle
-                label="Senate"
-                active={chamberFilter === "Senate"}
-                onClick={() => setChamberFilter("Senate")}
               />
             </div>
           </div>

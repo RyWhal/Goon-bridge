@@ -1,27 +1,20 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { getSupabase } from "../lib/supabase";
+import { requireAdminAuth } from "../middleware/admin-auth";
 import {
   normalizeDisclosureTradesForFiling,
   refreshHouseDisclosures,
   refreshSenateDisclosures,
 } from "../lib/disclosures";
+import { hasSupabase, isValidDate, parseLimit } from "../lib/validation";
 
 const disclosures = new Hono<Env>();
 
-function hasSupabase(env: Env["Bindings"]): boolean {
-  return !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY);
-}
-
-function isValidDate(value: string | undefined): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-function parseLimit(value: string | undefined, fallback: number, max = 200) {
-  const parsed = Number.parseInt(value ?? "", 10);
-  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) return fallback;
-  return Math.max(1, Math.min(parsed, max));
-}
+// All POST (mutation) routes require admin authentication
+disclosures.use("/refresh/*", requireAdminAuth);
+disclosures.use("/backfill", requireAdminAuth);
+disclosures.use("/normalize/*", requireAdminAuth);
 
 function parseOptionalLimit(value: string | undefined, max = 200): number | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;

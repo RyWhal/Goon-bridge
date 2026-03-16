@@ -219,9 +219,6 @@ function PartyBadge({ party }: { party?: string | null }) {
 export function CorrelationExplorer() {
   const [query, setQuery] = useState("");
   const [selectedBioguideId, setSelectedBioguideId] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
   const [expandedCaseIds, setExpandedCaseIds] = useState<number[]>([]);
 
   const member = useApi<CorrelationMemberResponse>();
@@ -234,53 +231,10 @@ export function CorrelationExplorer() {
 
   const loadMemberCases = async (bioguideId: string) => {
     setSelectedBioguideId(bioguideId);
-    setRefreshError(null);
-    setRefreshMessage(null);
     await Promise.all([
       member.fetchData(`/api/correlation/member/${bioguideId}`),
       cases.fetchData(`/api/correlation/member/${bioguideId}/cases`),
     ]);
-  };
-
-  const refreshCases = async () => {
-    if (!selectedBioguideId) return;
-    setRefreshing(true);
-    setRefreshError(null);
-    setRefreshMessage(null);
-
-    try {
-      const response = await fetch(`/api/correlation/refresh/member/${selectedBioguideId}/cases`, {
-        method: "POST",
-      });
-      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-      if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
-        const errorMessage =
-          (typeof payload.error === "string" && payload.error)
-          || (typeof payload.detail === "string" && payload.detail)
-          || `HTTP ${response.status}`;
-        setRefreshError(errorMessage);
-        setRefreshing(false);
-        return;
-      }
-
-      const factCount = typeof payload.factCount === "number" ? payload.factCount : null;
-      const caseCount = typeof payload.caseCount === "number" ? payload.caseCount : null;
-      setRefreshMessage(
-        [
-          "Materialized correlations refreshed",
-          factCount != null ? `${factCount} facts` : null,
-          caseCount != null ? `${caseCount} cases` : null,
-        ].filter((value): value is string => !!value).join(" · ")
-      );
-      await Promise.all([
-        cases.fetchData(`/api/correlation/member/${selectedBioguideId}/cases`),
-        recentCases.fetchData("/api/correlation/cases/recent?limit=24"),
-      ]);
-    } catch (error) {
-      setRefreshError(error instanceof Error ? error.message : "Failed to refresh correlations");
-    } finally {
-      setRefreshing(false);
-    }
   };
 
   const selectedMember = member.data?.member;
@@ -475,20 +429,7 @@ export function CorrelationExplorer() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void refreshCases()}
-                      disabled={refreshing}
-                      className={`btn ${refreshing ? "btn-ghost opacity-60 cursor-not-allowed" : "btn-primary"}`}
-                    >
-                      {refreshing ? "Refreshing..." : "Refresh Cases"}
-                    </button>
-                  </div>
                 </div>
-
-                {refreshMessage && <p className="mt-3 text-sm text-vibe-accent">{refreshMessage}</p>}
-                {refreshError && <p className="mt-3 text-sm text-vibe-nay">{refreshError}</p>}
               </div>
 
               {cases.loading && (
@@ -506,7 +447,7 @@ export function CorrelationExplorer() {
               {!cases.loading && !cases.error && (cases.data?.cases?.length ?? 0) === 0 && (
                 <div className="card">
                   <p className="text-sm text-vibe-dim">
-                    No materialized cases for this member yet. If you have already ingested related trades, contracts, or lobbying activity, try refreshing cases.
+                    No materialized cases for this member yet.
                   </p>
                 </div>
               )}
