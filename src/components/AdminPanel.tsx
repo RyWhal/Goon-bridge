@@ -233,6 +233,7 @@ function JobCard({
 }
 
 export function AdminPanel() {
+  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem("admin_api_key") ?? "");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [runningJobs, setRunningJobs] = useState<Set<string>>(new Set());
   const logRef = useRef<HTMLDivElement>(null);
@@ -260,7 +261,9 @@ export function AdminPanel() {
       });
 
       try {
-        const resp = await fetch(url, { method: "POST" });
+        const headers: Record<string, string> = {};
+        if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+        const resp = await fetch(url, { method: "POST", headers });
         const body = await resp.json().catch(() => null);
 
         if (resp.ok && body && typeof body === "object" && !("error" in body)) {
@@ -302,7 +305,7 @@ export function AdminPanel() {
         });
       }
     },
-    [runningJobs, appendLog],
+    [runningJobs, appendLog, apiKey],
   );
 
   return (
@@ -310,6 +313,20 @@ export function AdminPanel() {
       <div>
         <h2 className="text-base font-bold text-vibe-text tracking-tight">Admin Panel</h2>
         <p className="text-xs text-vibe-dim mt-1">Batch operations for data ingestion and processing</p>
+        <div className="mt-3 flex items-center gap-2">
+          <label className="text-[10px] uppercase tracking-wider text-vibe-dim shrink-0">API Key</label>
+          <input
+            type="password"
+            className="input text-sm py-1 px-2 flex-1 max-w-xs"
+            placeholder="Enter admin API key"
+            value={apiKey}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              sessionStorage.setItem("admin_api_key", e.target.value);
+            }}
+          />
+          {apiKey && <span className="text-[10px] text-vibe-yea">Set</span>}
+        </div>
       </div>
 
       {/* Disclosure Jobs */}
