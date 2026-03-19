@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 import {
@@ -7,6 +7,17 @@ import {
   USA_SPENDING_DIRECT_FIELDS,
   type UsaSpendingAwardSearchResponse,
 } from "../lib/usaspending";
+
+interface LobbyingIssue {
+  code: string | null;
+  specificIssue: string | null;
+}
+
+interface LobbyingLobbyist {
+  firstName: string | null;
+  lastName: string | null;
+  coveredOfficialPosition: string | null;
+}
 
 interface LobbyingResult {
   symbol: string;
@@ -28,6 +39,19 @@ interface LobbyingResult {
   houseRegistrantId: string | null;
   chambers: string[];
   chamberLabel: string;
+  issues: LobbyingIssue[];
+  lobbyists: LobbyingLobbyist[];
+}
+
+interface LdaActivity {
+  generalIssueAreaCode: string | null;
+  specificIssues: string | null;
+  lobbyists: LobbyingLobbyist[];
+}
+
+interface LdaFilingDetail {
+  uuid: string;
+  activities: LdaActivity[];
 }
 
 interface LobbyingSearchResponse {
@@ -77,6 +101,13 @@ function defaultEndDate(): string {
   return formatDateInput(new Date());
 }
 
+type CorporateSubTab = "lobbying" | "contracts";
+
+const CORPORATE_SUB_TABS: { id: CorporateSubTab; label: string }[] = [
+  { id: "lobbying", label: "Lobbying Filings" },
+  { id: "contracts", label: "Gov Contracts" },
+];
+
 export function CorporationSearch() {
   const [searchInput, setSearchInput] = useState("");
   const [from, setFrom] = useState(defaultStartDate);
@@ -86,10 +117,9 @@ export function CorporationSearch() {
   const [resolvedCompanyName, setResolvedCompanyName] = useState<string | null>(null);
   const [lobbyingPage, setLobbyingPage] = useState(1);
   const [spendingPage, setSpendingPage] = useState(1);
-  const [sectionsExpanded, setSectionsExpanded] = useState({
-    lobbying: true,
-    spending: true,
-  });
+  const [activeSubTab, setActiveSubTab] = useState<CorporateSubTab>("lobbying");
+  const [ldaByUuid, setLdaByUuid] = useState<Map<string, LdaFilingDetail>>(new Map());
+  const fetchingUuids = useRef<Set<string>>(new Set());
   const symbolLookup = useApi<SymbolLookupResponse>();
   const lobbying = useApi<LobbyingSearchResponse>();
   const spending = useApi<UsaSpendingAwardSearchResponse>();
@@ -205,6 +235,41 @@ export function CorporationSearch() {
     (lobbyingPage - 1) * PAGE_SIZE,
     lobbyingPage * PAGE_SIZE
   );
+
+  // Fetch Senate LDA details for each visible lobbying filing that has a UUID.
+  // Results are cached in ldaByUuid; fetchingUuids prevents duplicate requests.
+  useEffect(() => {
+    const uuids = visibleLobbyingResults
+      .map((r) => r.uuid)
+      .filter((uuid): uuid is string => !!uuid && !ldaByUuid.has(uuid) && !fetchingUuids.current.has(uuid));
+
+    if (uuids.length === 0) return;
+
+    uuids.forEach((uuid) => fetchingUuids.current.add(uuid));
+
+    Promise.allSettled(
+      uuids.map((uuid) =>
+        fetch(`/api/lda/filing?uuid=${encodeURIComponent(uuid)}`)
+          .then((r) => (r.ok ? (r.json() as Promise<LdaFilingDetail>) : null))
+          .catch(() => null)
+      )
+    ).then((results) => {
+      setLdaByUuid((prev) => {
+        const next = new Map(prev);
+        results.forEach((result, i) => {
+          const uuid = uuids[i];
+          if (result.status === "fulfilled" && result.value) {
+            next.set(uuid, result.value);
+          }
+          fetchingUuids.current.delete(uuid);
+        });
+        return next;
+      });
+    });
+  // visibleLobbyingResults identity changes on every page turn; that's the desired trigger
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleLobbyingResults]);
+
   const spendingResults = spending.data?.data ?? [];
   const spendingTotalPages = Math.max(1, Math.ceil(spendingResults.length / PAGE_SIZE));
   const visibleSpendingResults = spendingResults.slice(
@@ -277,304 +342,320 @@ export function CorporationSearch() {
 
       {resolvedSymbol && (hasLobbyingResponse || hasSpendingResponse) && (
         <>
-          <section className="space-y-3">
-            <SectionHeader
-              title="Lobbying Filings"
-              expanded={sectionsExpanded.lobbying}
-              onToggle={() =>
-                setSectionsExpanded((current) => ({ ...current, lobbying: !current.lobbying }))
-              }
-              aside={`${from} to ${to}`}
-            />
+          {/* Sub-tab navigation */}
+          <div className="border-b border-vibe-border">
+            <div className="flex gap-1">
+              {CORPORATE_SUB_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveSubTab(tab.id)}
+                  className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                    activeSubTab === tab.id
+                      ? "border-vibe-money text-vibe-money"
+                      : "border-transparent text-vibe-dim hover:text-vibe-text"
+                  }`}
+                >
+                  {tab.label}
+                  {tab.id === "lobbying" && lobbying.data
+                    ? ` (${lobbying.data.count})`
+                    : ""}
+                  {tab.id === "contracts" && spending.data
+                    ? ` (${spending.data.count})`
+                    : ""}
+                </button>
+              ))}
+            </div>
+          </div>
 
-            {sectionsExpanded.lobbying && (
-              <>
-                {lobbying.error && (
-                  <div className="card border-vibe-nay/30">
-                    <p className="text-sm text-vibe-nay">{lobbying.error}</p>
-                  </div>
-                )}
+          {/* Lobbying Filings sub-tab */}
+          {activeSubTab === "lobbying" && (
+            <section className="space-y-3">
+              {lobbying.error && (
+                <div className="card border-vibe-nay/30">
+                  <p className="text-sm text-vibe-nay">{lobbying.error}</p>
+                </div>
+              )}
 
-                {lobbying.data && (
-                  <>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                      <SummaryStat label="Ticker" value={lobbying.data.symbol} />
-                      <SummaryStat label="Filings" value={lobbying.data.count.toLocaleString()} />
-                      <SummaryStat
-                        label="Senate-linked"
-                        value={lobbying.data.summary.senateCount.toLocaleString()}
-                      />
-                      <SummaryStat
-                        label="House-linked"
-                        value={lobbying.data.summary.houseCount.toLocaleString()}
-                      />
-                    </div>
-
-                    <PaginationControls
-                      page={lobbyingPage}
-                      pages={lobbyingTotalPages}
-                      onPageChange={setLobbyingPage}
+              {lobbying.data && (
+                <>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    <SummaryStat label="Ticker" value={lobbying.data.symbol} />
+                    <SummaryStat label="Filings" value={lobbying.data.count.toLocaleString()} />
+                    <SummaryStat
+                      label="Senate-linked"
+                      value={lobbying.data.summary.senateCount.toLocaleString()}
                     />
+                    <SummaryStat
+                      label="House-linked"
+                      value={lobbying.data.summary.houseCount.toLocaleString()}
+                    />
+                  </div>
 
-                    {lobbying.data.data.length === 0 ? (
-                      <div className="card">
-                        <p className="text-sm text-vibe-dim">
-                          No lobbying filings matched this ticker and date range.
-                        </p>
-                      </div>
-                    ) : (
-                      visibleLobbyingResults.map((record, index) => (
-                        <div
-                          key={
-                            record.uuid ??
-                            [
-                              record.symbol,
-                              record.year ?? "unknown",
-                              record.type ?? "unknown",
-                              record.clientId ?? "no-client",
-                              record.registrantId ?? "no-registrant",
-                              record.dtPosted ?? "no-date",
-                              index,
-                            ].join("-")
-                          }
-                          className="card"
-                        >
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-sm font-medium">{record.name ?? record.symbol}</p>
-                                <span className="badge bg-vibe-border text-vibe-text">
-                                  {record.chamberLabel}
+                  <PaginationControls
+                    page={lobbyingPage}
+                    pages={lobbyingTotalPages}
+                    onPageChange={setLobbyingPage}
+                  />
+
+                  {lobbying.data.data.length === 0 ? (
+                    <div className="card">
+                      <p className="text-sm text-vibe-dim">
+                        No lobbying filings matched this ticker and date range.
+                      </p>
+                    </div>
+                  ) : (
+                    visibleLobbyingResults.map((record, index) => (
+                      <div
+                        key={
+                          record.uuid ??
+                          [
+                            record.symbol,
+                            record.year ?? "unknown",
+                            record.type ?? "unknown",
+                            record.clientId ?? "no-client",
+                            record.registrantId ?? "no-registrant",
+                            record.dtPosted ?? "no-date",
+                            index,
+                          ].join("-")
+                        }
+                        className="card space-y-2"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-medium">{record.name ?? record.symbol}</p>
+                              <span className="badge bg-vibe-border text-vibe-text">
+                                {record.chamberLabel}
+                              </span>
+                              {record.type && (
+                                <span className="badge bg-vibe-money/20 text-vibe-money">
+                                  {record.type}
                                 </span>
-                                {record.type && (
-                                  <span className="badge bg-vibe-money/20 text-vibe-money">
-                                    {record.type}
-                                  </span>
-                                )}
-                              </div>
-                              {record.description && (
-                                <p className="text-xs text-vibe-dim mt-1">{record.description}</p>
-                              )}
-                              <p className="text-xs text-vibe-dim mt-1">
-                                {record.year ?? "Unknown year"}
-                                {record.period ? ` · ${record.period.replace(/_/g, " ")}` : ""}
-                                {record.country ? ` · ${record.country}` : ""}
-                              </p>
-                              <p className="text-xs text-vibe-dim mt-1">
-                                Senate ID: {record.senateId ?? "N/A"} | House ID: {record.houseRegistrantId ?? "N/A"}
-                              </p>
-                              {record.documentUrl && (
-                                <a
-                                  href={record.documentUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-xs text-vibe-accent hover:underline inline-block mt-2"
-                                >
-                                  View filing →
-                                </a>
                               )}
                             </div>
-                            <div className="text-right shrink-0">
-                              <p className="text-sm font-bold text-vibe-money">
-                                {formatLobbyingAmount(record.income, record.expenses)}
-                              </p>
-                              <p className="text-xs text-vibe-dim">income / expenses</p>
-                            </div>
+                            {record.description && (
+                              <p className="text-xs text-vibe-dim mt-1">{record.description}</p>
+                            )}
+                            <p className="text-xs text-vibe-dim mt-1">
+                              {record.year ?? "Unknown year"}
+                              {record.period ? ` · ${record.period.replace(/_/g, " ")}` : ""}
+                              {record.country ? ` · ${record.country}` : ""}
+                            </p>
+                            <p className="text-xs text-vibe-dim mt-1">
+                              Senate ID: {record.senateId ?? "N/A"} | House ID: {record.houseRegistrantId ?? "N/A"}
+                            </p>
+                            {record.documentUrl && (
+                              <a
+                                href={record.documentUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-xs text-vibe-accent hover:underline inline-block mt-2"
+                              >
+                                View filing →
+                              </a>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-sm font-bold text-vibe-money">
+                              {formatLobbyingAmount(record.income, record.expenses)}
+                            </p>
+                            <p className="text-xs text-vibe-dim">income / expenses</p>
                           </div>
                         </div>
-                      ))
-                    )}
 
-                    <JsonViewer data={lobbying.data} label="Lobbying Response" />
-                  </>
-                )}
-              </>
-            )}
-          </section>
-
-          <section className="space-y-3">
-            <SectionHeader
-              title="Government Contract Activity"
-              expanded={sectionsExpanded.spending}
-              onToggle={() =>
-                setSectionsExpanded((current) => ({ ...current, spending: !current.spending }))
-              }
-              aside="Direct USAspending contract awards"
-            />
-
-            {sectionsExpanded.spending && (
-              <>
-                {spending.error && (
-                  <div className="card border-vibe-nay/30">
-                    <p className="text-sm text-vibe-nay">{spending.error}</p>
-                  </div>
-                )}
-
-                {spending.data && (
-                  <>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                      <SummaryStat label="Awards" value={spending.data.count.toLocaleString()} />
-                      <SummaryStat
-                        label="Total value"
-                        value={`$${spending.data.summary.totalValue.toLocaleString(undefined, {
-                          maximumFractionDigits: 0,
-                        })}`}
-                      />
-                      <SummaryStat
-                        label="Avg award"
-                        value={`$${spending.data.summary.averageAwardValue.toLocaleString(undefined, {
-                          maximumFractionDigits: 0,
-                        })}`}
-                      />
-                      <SummaryStat
-                        label="Top agency"
-                        value={spending.data.summary.topAgencyName ?? "N/A"}
-                      />
-                    </div>
-
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      <SummaryStat
-                        label="Search mode"
-                        value="Name search"
-                      />
-                      <SummaryStat
-                        label="Recipient"
-                        value={spending.data.recipient.recipientName ?? resolvedCompanyName ?? "N/A"}
-                      />
-                      <SummaryStat
-                        label="Recipient ID"
-                        value={spending.data.recipient.recipientId ?? "N/A"}
-                      />
-                    </div>
-
-                    <PaginationControls
-                      page={spendingPage}
-                      pages={spendingTotalPages}
-                      onPageChange={setSpendingPage}
-                    />
-
-                    {spending.data.data.length === 0 ? (
-                      <div className="card">
-                        <p className="text-sm text-vibe-dim">
-                          No recent USAspending awards matched this company and date range.
-                        </p>
+                        {/* Senate LDA detail: issue areas + lobbyists */}
+                        {record.uuid && (() => {
+                          const lda = ldaByUuid.get(record.uuid);
+                          if (!lda) {
+                            return (
+                              <p className="text-xs text-vibe-dim border-t border-vibe-border pt-2">
+                                Loading issue areas &amp; lobbyists…
+                              </p>
+                            );
+                          }
+                          if (lda.activities.length === 0) return null;
+                          return (
+                            <div className="border-t border-vibe-border pt-2 space-y-3">
+                              {lda.activities.map((activity, ai) => (
+                                <div key={ai} className="space-y-1">
+                                  {/* Issue area header */}
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {activity.generalIssueAreaCode && (
+                                      <span className="badge bg-vibe-accent/20 text-vibe-accent">
+                                        {activity.generalIssueAreaCode}
+                                      </span>
+                                    )}
+                                    {activity.specificIssues && (
+                                      <p className="text-xs text-vibe-text">{activity.specificIssues}</p>
+                                    )}
+                                  </div>
+                                  {/* Lobbyists for this issue area */}
+                                  {activity.lobbyists.length > 0 && (
+                                    <div className="grid gap-1 sm:grid-cols-2">
+                                      {activity.lobbyists.map((lobbyist, li) => {
+                                        const fullName = [lobbyist.firstName, lobbyist.lastName]
+                                          .filter(Boolean)
+                                          .join(" ");
+                                        return (
+                                          <div key={li} className="rounded bg-vibe-surface px-2 py-1">
+                                            <p className="text-xs font-medium text-vibe-text">
+                                              {fullName || "Unknown"}
+                                            </p>
+                                            {lobbyist.coveredOfficialPosition && (
+                                              <p className="text-xs text-vibe-dim mt-0.5">
+                                                {lobbyist.coveredOfficialPosition}
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
                       </div>
-                    ) : (
-                      visibleSpendingResults.map((record, index) => (
-                        <div key={`${record.permalink ?? record.actionDate ?? "award"}-${index}`} className="card">
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-sm font-medium">
-                                  {record.recipientName ?? record.recipientParentName ?? record.symbol}
-                                </p>
-                                {record.awardingAgencyName && (
-                                  <span className="badge bg-vibe-border text-vibe-text">
-                                    {record.awardingAgencyName}
-                                  </span>
-                                )}
-                              </div>
-                              {record.awardDescription && (
-                                <p className="text-xs text-vibe-dim mt-1">{record.awardDescription}</p>
-                              )}
-                              <p className="text-xs text-vibe-dim mt-1">
-                                Action: {record.actionDate ?? "Unknown"}
-                                {record.performanceState ? ` · ${record.performanceState}` : ""}
-                                {record.performanceCity ? ` · ${record.performanceCity}` : ""}
-                                {record.naicsCode ? ` · NAICS ${record.naicsCode}` : ""}
+                    ))
+                  )}
+
+                  <JsonViewer data={lobbying.data} label="Lobbying Response" />
+                </>
+              )}
+            </section>
+          )}
+
+          {/* Gov Contracts sub-tab */}
+          {activeSubTab === "contracts" && (
+            <section className="space-y-3">
+              {spending.error && (
+                <div className="card border-vibe-nay/30">
+                  <p className="text-sm text-vibe-nay">{spending.error}</p>
+                </div>
+              )}
+
+              {spending.data && (
+                <>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    <SummaryStat label="Awards" value={spending.data.count.toLocaleString()} />
+                    <SummaryStat
+                      label="Total value"
+                      value={`$${spending.data.summary.totalValue.toLocaleString(undefined, {
+                        maximumFractionDigits: 0,
+                      })}`}
+                    />
+                    <SummaryStat
+                      label="Avg award"
+                      value={`$${spending.data.summary.averageAwardValue.toLocaleString(undefined, {
+                        maximumFractionDigits: 0,
+                      })}`}
+                    />
+                    <SummaryStat
+                      label="Top agency"
+                      value={spending.data.summary.topAgencyName ?? "N/A"}
+                    />
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <SummaryStat
+                      label="Search mode"
+                      value="Name search"
+                    />
+                    <SummaryStat
+                      label="Recipient"
+                      value={spending.data.recipient.recipientName ?? resolvedCompanyName ?? "N/A"}
+                    />
+                    <SummaryStat
+                      label="Recipient ID"
+                      value={spending.data.recipient.recipientId ?? "N/A"}
+                    />
+                  </div>
+
+                  <PaginationControls
+                    page={spendingPage}
+                    pages={spendingTotalPages}
+                    onPageChange={setSpendingPage}
+                  />
+
+                  {spending.data.data.length === 0 ? (
+                    <div className="card">
+                      <p className="text-sm text-vibe-dim">
+                        No recent USAspending awards matched this company and date range.
+                      </p>
+                    </div>
+                  ) : (
+                    visibleSpendingResults.map((record, index) => (
+                      <div key={`${record.permalink ?? record.actionDate ?? "award"}-${index}`} className="card">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-medium">
+                                {record.recipientName ?? record.recipientParentName ?? record.symbol}
                               </p>
-                              {(record.awardId || record.awardType) && (
-                                <p className="text-xs text-vibe-dim mt-1">
-                                  {record.awardId ? `Award ID: ${record.awardId}` : "Award ID: N/A"}
-                                  {record.awardType ? ` · ${record.awardType}` : ""}
-                                </p>
-                              )}
-                              <p className="text-xs text-vibe-dim mt-1">
-                                {record.awardingSubAgencyName ?? "Unknown sub-agency"}
-                                {record.awardingOfficeName ? ` · ${record.awardingOfficeName}` : ""}
-                              </p>
-                              {record.permalink && (
-                                <a
-                                  href={record.permalink}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-xs text-vibe-accent hover:underline inline-block mt-2"
-                                >
-                                  View award →
-                                </a>
+                              {record.awardingAgencyName && (
+                                <span className="badge bg-vibe-border text-vibe-text">
+                                  {record.awardingAgencyName}
+                                </span>
                               )}
                             </div>
-                            <div className="text-right shrink-0">
-                              <p className="text-sm font-bold text-vibe-money">
-                                {record.totalValue == null
-                                  ? "N/A"
-                                  : `$${record.totalValue.toLocaleString(undefined, {
-                                      maximumFractionDigits: 0,
-                                    })}`}
+                            {record.awardDescription && (
+                              <p className="text-xs text-vibe-dim mt-1">{record.awardDescription}</p>
+                            )}
+                            <p className="text-xs text-vibe-dim mt-1">
+                              Action: {record.actionDate ?? "Unknown"}
+                              {record.performanceState ? ` · ${record.performanceState}` : ""}
+                              {record.performanceCity ? ` · ${record.performanceCity}` : ""}
+                              {record.naicsCode ? ` · NAICS ${record.naicsCode}` : ""}
+                            </p>
+                            {(record.awardId || record.awardType) && (
+                              <p className="text-xs text-vibe-dim mt-1">
+                                {record.awardId ? `Award ID: ${record.awardId}` : "Award ID: N/A"}
+                                {record.awardType ? ` · ${record.awardType}` : ""}
                               </p>
-                              <p className="text-xs text-vibe-dim">award value</p>
-                            </div>
+                            )}
+                            <p className="text-xs text-vibe-dim mt-1">
+                              {record.awardingSubAgencyName ?? "Unknown sub-agency"}
+                              {record.awardingOfficeName ? ` · ${record.awardingOfficeName}` : ""}
+                            </p>
+                            {record.permalink && (
+                              <a
+                                href={record.permalink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-xs text-vibe-accent hover:underline inline-block mt-2"
+                              >
+                                View award →
+                              </a>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-sm font-bold text-vibe-money">
+                              {record.totalValue == null
+                                ? "N/A"
+                                : `$${record.totalValue.toLocaleString(undefined, {
+                                    maximumFractionDigits: 0,
+                                  })}`}
+                            </p>
+                            <p className="text-xs text-vibe-dim">award value</p>
                           </div>
                         </div>
-                      ))
-                    )}
+                      </div>
+                    ))
+                  )}
 
-                    <JsonViewer data={spending.data} label="USASpending Response" />
-                  </>
-                )}
-              </>
-            )}
-          </section>
+                  <JsonViewer data={spending.data} label="USASpending Response" />
+                </>
+              )}
+            </section>
+          )}
         </>
       )}
     </div>
   );
 }
 
-function SectionHeader({
-  title,
-  expanded,
-  onToggle,
-  aside,
-}: {
-  title: string;
-  expanded: boolean;
-  onToggle: () => void;
-  aside?: string | null;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className="flex w-full items-center justify-between gap-3 text-left"
-    >
-      <span className="flex items-center gap-2">
-        <Chevron expanded={expanded} />
-        <span className="text-sm font-semibold uppercase tracking-wider text-vibe-money">
-          {title}
-        </span>
-      </span>
-      {aside ? <span className="text-xs text-vibe-dim">{aside}</span> : null}
-    </button>
-  );
-}
-
-function Chevron({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      aria-hidden="true"
-      className={`h-4 w-4 text-vibe-dim transition-transform ${expanded ? "rotate-0" : "-rotate-90"}`}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M5 7.5 10 12.5 15 7.5" />
-    </svg>
-  );
-}
 
 function SummaryStat({ label, value }: { label: string; value: string }) {
   return (

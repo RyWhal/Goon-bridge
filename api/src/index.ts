@@ -13,6 +13,7 @@ import { sunrise } from "./apis/sunrise";
 import { lunar } from "./apis/lunar";
 import { correlation } from "./apis/correlation";
 import { disclosures } from "./apis/disclosures";
+import { lda } from "./apis/lda";
 import { getSupabase } from "./lib/supabase";
 import pkg from "../package.json";
 
@@ -96,6 +97,7 @@ app.route("/api/sunrise", sunrise);
 app.route("/api/lunar", lunar);
 app.route("/api/correlation", correlation);
 app.route("/api/disclosures", disclosures);
+app.route("/api/lda", lda);
 
 // ── Vote context (aggregated) ────────────────────────────────────────────────
 // Returns all correlation data for a given date in a single response

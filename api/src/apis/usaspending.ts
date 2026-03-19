@@ -19,7 +19,7 @@ import { readErrorDetail } from "../lib/error-utils";
 const usaspending = new Hono<Env>();
 
 const BASE = "https://api.usaspending.gov";
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 async function usaspendingFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetchWithTimeout(`${BASE}${path}`, REQUEST_TIMEOUT_MS, {
@@ -43,6 +43,10 @@ async function searchAwards(
 
   for (const body of bodies) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+      }
+
       let resp: Response;
       try {
         resp = await usaspendingFetch("/api/v2/search/spending_by_award/", {
@@ -60,11 +64,13 @@ async function searchAwards(
       }
 
       if (resp.ok) {
-        return {
-          ok: true,
-          body: (await resp.json()) as UsaSpendingAwardSearchResponse,
-          requestBody: body,
-        };
+        const raw = (await resp.json()) as UsaSpendingAwardSearchResponse & { detail?: string };
+        // USAspending occasionally returns HTTP 200 with an error body
+        if (raw && typeof raw === "object" && raw.detail && !raw.results) {
+          lastFailure = { ok: false, status: 500, detail: String(raw.detail), requestBody: body };
+          continue;
+        }
+        return { ok: true, body: raw, requestBody: body };
       }
 
       lastFailure = {

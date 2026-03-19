@@ -9,6 +9,17 @@ const finnhub = new Hono<Env>();
 const BASE = "https://finnhub.io/api/v1";
 const FINNHUB_FETCH_TIMEOUT_MS = 12_000;
 
+interface FinnhubLobbyingIssue {
+  code?: string | null;
+  specificIssue?: string | null;
+}
+
+interface FinnhubLobbyist {
+  firstName?: string | null;
+  lastName?: string | null;
+  coveredOfficialPosition?: string | null;
+}
+
 interface FinnhubLobbyingRecord {
   symbol?: string | null;
   name?: string | null;
@@ -27,6 +38,8 @@ interface FinnhubLobbyingRecord {
   registrantId?: string | null;
   senateId?: string | null;
   houseRegistrantId?: string | null;
+  issues?: FinnhubLobbyingIssue[] | null;
+  lobbyists?: FinnhubLobbyist[] | null;
 }
 
 interface FinnhubSymbolSearchResult {
@@ -206,6 +219,19 @@ finnhub.get("/lobbying", async (c) => {
         chambers,
         chamberLabel:
           chambers.length === 2 ? "Senate + House" : chambers[0] ?? "Unknown",
+        issues: Array.isArray(item.issues)
+          ? item.issues.map((issue) => ({
+              code: issue.code ?? null,
+              specificIssue: issue.specificIssue ?? null,
+            }))
+          : [],
+        lobbyists: Array.isArray(item.lobbyists)
+          ? item.lobbyists.map((lobbyist) => ({
+              firstName: lobbyist.firstName ?? null,
+              lastName: lobbyist.lastName ?? null,
+              coveredOfficialPosition: lobbyist.coveredOfficialPosition ?? null,
+            }))
+          : [],
       };
     });
 
