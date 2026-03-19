@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildTradeSearchParams,
   collectTradePriceLookupKeys,
+  computeTradeShareSnapshot,
   computeTradePriceSnapshot,
   isCurrentPriceStale,
 } from "../src/lib/stock-trades.ts";
@@ -14,6 +15,7 @@ test("buildTradeSearchParams normalizes and validates trade filters", () => {
     member: "  Nancy Pelosi ",
     transaction_type: "purchase",
     symbol: " nvda ",
+    sort: "disclosure_date",
     limit: "40",
     offset: "20",
   });
@@ -24,6 +26,7 @@ test("buildTradeSearchParams normalizes and validates trade filters", () => {
     member: "Nancy Pelosi",
     transactionType: "purchase",
     symbol: "NVDA",
+    sort: "disclosure_date",
     limit: 40,
     offset: 20,
     hasFilters: true,
@@ -37,6 +40,15 @@ test("buildTradeSearchParams rejects reversed date windows", () => {
       to: "2024-06-01",
     }),
     { error: "'from' date must be on or before 'to' date" }
+  );
+});
+
+test("buildTradeSearchParams falls back to trade-date sorting for unknown sort", () => {
+  assert.equal(
+    buildTradeSearchParams({
+      sort: "whatever",
+    }).sort,
+    "trade_date",
   );
 });
 
@@ -56,6 +68,36 @@ test("computeTradePriceSnapshot prefers stored trade-day close and computes delt
       priceChangeSinceTrade: 5.54,
       priceChangePercentSinceTrade: 4.2,
     }
+  );
+});
+
+test("computeTradeShareSnapshot preserves exact counts and falls back to an estimate", () => {
+  assert.deepEqual(
+    computeTradeShareSnapshot({
+      storedShareCount: 5,
+      rawShareCountSource: "pdf_exact",
+      amountRange: "$1,001 - $15,000",
+      estimatedTradeValue: 8000,
+      tradeDateClosePrice: 125,
+    }),
+    {
+      shareCount: 5,
+      shareCountSource: "pdf_exact",
+    },
+  );
+
+  assert.deepEqual(
+    computeTradeShareSnapshot({
+      storedShareCount: null,
+      rawShareCountSource: null,
+      amountRange: "$1,001 - $15,000",
+      estimatedTradeValue: null,
+      tradeDateClosePrice: 100,
+    }),
+    {
+      shareCount: 80.005,
+      shareCountSource: "estimated_from_amount_and_close",
+    },
   );
 });
 

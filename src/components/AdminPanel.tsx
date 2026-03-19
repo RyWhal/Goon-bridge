@@ -1,22 +1,11 @@
 import { useState, useCallback, useRef } from "react";
-
-interface JobConfig {
-  id: string;
-  label: string;
-  description: string;
-  endpoint: string;
-  method?: string;
-  params?: ParamDef[];
-}
-
-interface ParamDef {
-  name: string;
-  label: string;
-  type: "text" | "date" | "number" | "select";
-  required?: boolean;
-  placeholder?: string;
-  options?: { value: string; label: string }[];
-}
+import {
+  CONGRESS_JOBS,
+  CORRELATION_JOBS,
+  getDisclosureAdvancedJobs,
+  getDisclosurePrimaryJobs,
+  type JobConfig,
+} from "../lib/admin-jobs";
 
 interface LogEntry {
   timestamp: string;
@@ -26,140 +15,6 @@ interface LogEntry {
   message: string;
   detail?: unknown;
 }
-
-const DISCLOSURE_JOBS: JobConfig[] = [
-  {
-    id: "refresh-senate",
-    label: "Refresh Senate Disclosures",
-    description: "Ingest Senate financial disclosures for a date range",
-    endpoint: "/api/disclosures/refresh/senate",
-    params: [
-      { name: "from", label: "From", type: "date", required: true },
-      { name: "to", label: "To", type: "date", required: true },
-      { name: "limit", label: "Limit", type: "number", placeholder: "500" },
-    ],
-  },
-  {
-    id: "refresh-house",
-    label: "Refresh House Disclosures",
-    description: "Ingest House financial disclosures for a date range",
-    endpoint: "/api/disclosures/refresh/house",
-    params: [
-      { name: "from", label: "From", type: "date", required: true },
-      { name: "to", label: "To", type: "date", required: true },
-      { name: "limit", label: "Limit", type: "number", placeholder: "500" },
-    ],
-  },
-  {
-    id: "backfill",
-    label: "Backfill Disclosures",
-    description: "Bulk ingest historical disclosures for either chamber",
-    endpoint: "/api/disclosures/backfill",
-    params: [
-      {
-        name: "chamber",
-        label: "Chamber",
-        type: "select",
-        required: true,
-        options: [
-          { value: "senate", label: "Senate" },
-          { value: "house", label: "House" },
-        ],
-      },
-      { name: "from", label: "From", type: "date", required: true },
-      { name: "to", label: "To", type: "date", required: true },
-      { name: "limit", label: "Limit", type: "number", placeholder: "500" },
-    ],
-  },
-  {
-    id: "normalize-trades",
-    label: "Normalize Trades",
-    description: "Normalize and enrich trades for a specific filing",
-    endpoint: "/api/disclosures/normalize/trades",
-    params: [
-      { name: "filing_id", label: "Filing ID", type: "number", required: true },
-    ],
-  },
-];
-
-const CORRELATION_JOBS: JobConfig[] = [
-  {
-    id: "refresh-organizations",
-    label: "Refresh Organizations",
-    description: "Ingest contribution data into organization records",
-    endpoint: "/api/correlation/refresh/organizations",
-    params: [
-      { name: "bioguide_id", label: "Bioguide ID", type: "text", placeholder: "optional" },
-      { name: "candidate_id", label: "Candidate ID", type: "text", placeholder: "optional" },
-      { name: "limit", label: "Limit", type: "number", placeholder: "500" },
-    ],
-  },
-  {
-    id: "refresh-org-activity",
-    label: "Refresh Org Activity",
-    description: "Fetch lobbying & contract data for an organization by ticker",
-    endpoint: "/api/correlation/refresh/organization/{symbol}/activity",
-    params: [
-      { name: "symbol", label: "Ticker Symbol", type: "text", required: true, placeholder: "AAPL" },
-      { name: "from", label: "From", type: "date", required: true },
-      { name: "to", label: "To", type: "date", required: true },
-    ],
-  },
-  {
-    id: "refresh-member-committees",
-    label: "Refresh Member Committees",
-    description: "Update committee assignments for a member",
-    endpoint: "/api/correlation/refresh/member/{bioguideId}/committees",
-    params: [
-      { name: "bioguideId", label: "Bioguide ID", type: "text", required: true },
-    ],
-  },
-  {
-    id: "refresh-member-cases",
-    label: "Refresh Member Cases",
-    description: "Materialize correlation cases for a single member",
-    endpoint: "/api/correlation/refresh/member/{bioguideId}/cases",
-    params: [
-      { name: "bioguideId", label: "Bioguide ID", type: "text", required: true },
-    ],
-  },
-  {
-    id: "refresh-all-cases",
-    label: "Refresh All Cases",
-    description: "Batch materialize cases for all members with trade activity",
-    endpoint: "/api/correlation/refresh/cases/all",
-    params: [
-      { name: "limit", label: "Limit", type: "number", placeholder: "50" },
-      { name: "offset", label: "Offset", type: "number", placeholder: "0" },
-    ],
-  },
-];
-
-const CONGRESS_JOBS: JobConfig[] = [
-  {
-    id: "warm-bills-cache",
-    label: "Warm Bills Cache",
-    description: "Fetch recent Congress.gov bill pages and upsert them into Supabase",
-    endpoint: "/api/congress/refresh/bills",
-    params: [
-      { name: "congress", label: "Congress", type: "number", placeholder: "119" },
-      { name: "type", label: "Bill Type", type: "text", placeholder: "optional (hr, s, hres)" },
-      { name: "pageSize", label: "Page Size", type: "number", placeholder: "100" },
-      { name: "maxPages", label: "Max Pages", type: "number", placeholder: "5" },
-      {
-        name: "sort",
-        label: "Sort",
-        type: "select",
-        options: [
-          { value: "updateDate+desc", label: "Updated desc" },
-          { value: "introducedDate+desc", label: "Introduced desc" },
-          { value: "updateDate+asc", label: "Updated asc" },
-          { value: "introducedDate+asc", label: "Introduced asc" },
-        ],
-      },
-    ],
-  },
-];
 
 function buildUrl(endpoint: string, params: Record<string, string>): string {
   let url = endpoint;
@@ -208,6 +63,7 @@ function JobCard({
       <div>
         <h3 className="text-sm font-semibold text-vibe-text">{job.label}</h3>
         <p className="text-xs text-vibe-dim mt-0.5">{job.description}</p>
+        {job.helperText && <p className="text-[11px] text-vibe-dim/80 mt-1">{job.helperText}</p>}
       </div>
 
       {job.params && job.params.length > 0 && (
@@ -263,6 +119,8 @@ export function AdminPanel() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [runningJobs, setRunningJobs] = useState<Set<string>>(new Set());
   const logRef = useRef<HTMLDivElement>(null);
+  const primaryDisclosureJobs = getDisclosurePrimaryJobs();
+  const advancedDisclosureJobs = getDisclosureAdvancedJobs();
 
   const appendLog = useCallback((entry: LogEntry) => {
     setLogs((prev) => [...prev, entry]);
@@ -355,14 +213,36 @@ export function AdminPanel() {
         </div>
       </div>
 
-      {/* Disclosure Jobs */}
       <section className="space-y-3">
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-vibe-dim">Disclosures</h3>
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-widest text-vibe-dim">Disclosure Imports</h3>
+          <p className="mt-1 text-xs text-vibe-dim">
+            Use these for normal House and Senate disclosure ingestion. These are the daily-driver actions.
+          </p>
+        </div>
         <div className="grid gap-3 sm:grid-cols-2">
-          {DISCLOSURE_JOBS.map((job) => (
+          {primaryDisclosureJobs.map((job) => (
             <JobCard key={job.id} job={job} onRun={runJob} running={runningJobs.has(job.id)} />
           ))}
         </div>
+      </section>
+
+      <section className="space-y-3">
+        <details className="card">
+          <summary className="cursor-pointer list-none select-none">
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-widest text-vibe-dim">Advanced Disclosure Tools</h3>
+              <p className="mt-1 text-xs text-vibe-dim">
+                Bulk catch-up and filing-specific repair actions. Use these when standard imports are not enough.
+              </p>
+            </div>
+          </summary>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {advancedDisclosureJobs.map((job) => (
+              <JobCard key={job.id} job={job} onRun={runJob} running={runningJobs.has(job.id)} />
+            ))}
+          </div>
+        </details>
       </section>
 
       {/* Correlation Jobs */}

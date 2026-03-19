@@ -275,6 +275,13 @@ function parseAmountRange(value) {
   };
 }
 
+function extractExplicitShareCount(text) {
+  const match = text?.match(/\b(\d[\d,]*(?:\.\d+)?)\s*(?:shares?|shrs?)\b/i);
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[1].replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 async function fetchFinnhubClosePrice(apiKey, symbol, date, cache) {
   if (!apiKey || !symbol || !date) return null;
   const cacheKey = `${symbol}:${date}`;
@@ -469,6 +476,7 @@ function parseHouseTradeRows(text) {
     const dates = [...joinedDetails.matchAll(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g)].map((match) => match[0]);
     const amountMatch = joinedDetails.match(AMOUNT_RANGE_RE);
     if (!amountMatch) continue;
+    const shareCount = extractExplicitShareCount(joinedDetails);
 
     while (i < lines.length && !ownerStartRe.test(lines[i]) && !footerRe.test(lines[i])) {
       i += 1;
@@ -490,11 +498,15 @@ function parseHouseTradeRows(text) {
       transactionDate: toIsoDate(dates[0] ?? null),
       notificationDate: toIsoDate(dates[1] ?? null),
       amountRange: amountMatch[0],
+      shareCount,
+      shareCountSource: shareCount != null ? "pdf_exact" : null,
       isPublicEquity: classification.isPublicEquity,
       parseConfidence: symbolGuess ? "high" : classification.isPublicEquity ? "medium" : "low",
       quarantineReason: classification.quarantineReason,
       rawPayload: {
         rawText: [ownerLabel, assetName, tradeType, ...dates, amountMatch[0]].join(" "),
+        shareCount,
+        shareCountSource: shareCount != null ? "pdf_exact" : null,
       },
     });
   }
@@ -688,6 +700,12 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
     const estimatedShareCount = executionClosePrice != null && estimatedTradeValue != null
       ? Number((estimatedTradeValue / executionClosePrice).toFixed(4))
       : null;
+    const resolvedShareCount = row.shareCount ?? estimatedShareCount;
+    const resolvedShareCountSource = row.shareCount != null
+      ? "pdf_exact"
+      : estimatedShareCount != null
+        ? "estimated_from_amount_and_close"
+        : null;
 
     let organizationId = null;
     if (row.isPublicEquity && row.assetName) {
@@ -705,6 +723,8 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
       estimatedTradeValue,
       executionClosePrice,
       estimatedShareCount,
+      shareCount: resolvedShareCount,
+      shareCountSource: resolvedShareCountSource,
       pricingMethod: executionClosePrice != null && estimatedTradeValue != null
         ? "midpoint_amount_range_div_same_day_close"
         : null,
@@ -746,7 +766,7 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
         disclosure_date: filing.filingDate,
         transaction_type: row.transactionType,
         amount_range: row.amountRange,
-        share_count: estimatedShareCount,
+        share_count: resolvedShareCount,
         owner_label: row.ownerLabel,
         owner_type: row.ownerType,
         asset_type: row.assetType,

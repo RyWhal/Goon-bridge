@@ -5,6 +5,7 @@ import type { getSupabase } from "./supabase";
 import { isValidDate, parseLimit, parseOffset } from "./validation.ts";
 
 export type TradeTransactionType = "purchase" | "sale" | "exchange";
+export type TradeSortMode = "trade_date" | "disclosure_date";
 type SupabaseClient = ReturnType<typeof getSupabase>;
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const FINNHUB_TIMEOUT_MS = 12_000;
@@ -18,6 +19,7 @@ type TradeSearchInput = {
   member?: string;
   transaction_type?: string;
   symbol?: string;
+  sort?: string;
   limit?: string;
   offset?: string;
 };
@@ -32,6 +34,7 @@ type TradeSearchParams =
       member?: string;
       transactionType?: TradeTransactionType;
       symbol?: string;
+      sort: TradeSortMode;
       limit: number;
       offset: number;
       hasFilters: boolean;
@@ -42,6 +45,14 @@ type PriceSnapshotInput = {
   cachedTradeDateClosePrice?: number | null;
   liveCurrentPrice?: number | null;
   currentPriceAsOf?: string | null;
+};
+
+type ShareSnapshotInput = {
+  storedShareCount?: number | null;
+  rawShareCountSource?: string | null;
+  amountRange?: string | null;
+  estimatedTradeValue?: number | null;
+  tradeDateClosePrice?: number | null;
 };
 
 type RequestPriceCache = {
@@ -79,6 +90,19 @@ function roundPercent(value: number) {
   return Math.round(value * 10) / 10;
 }
 
+function roundShareCount(value: number) {
+  return Math.round(value * 10000) / 10000;
+}
+
+function parseAmountRangeMidpoint(amountRange?: string | null) {
+  const match = amountRange?.match(/\$([\d,]+(?:\.\d+)?)\s*-\s*\$([\d,]+(?:\.\d+)?)/);
+  if (!match) return null;
+  const lower = Number.parseFloat(match[1]!.replace(/,/g, ""));
+  const upper = Number.parseFloat(match[2]!.replace(/,/g, ""));
+  if (!Number.isFinite(lower) || !Number.isFinite(upper)) return null;
+  return (lower + upper) / 2;
+}
+
 export function buildTradeSearchParams(input: TradeSearchInput): TradeSearchParams {
   const from = input.from?.trim() || undefined;
   const to = input.to?.trim() || undefined;
@@ -93,6 +117,7 @@ export function buildTradeSearchParams(input: TradeSearchInput): TradeSearchPara
 
   const member = input.member?.trim() || undefined;
   const symbol = input.symbol?.trim().toUpperCase() || undefined;
+  const sort: TradeSortMode = input.sort === "disclosure_date" ? "disclosure_date" : "trade_date";
   const transactionType = input.transaction_type?.trim() || undefined;
   const normalizedTransactionType = transactionType === "purchase"
     || transactionType === "sale"
@@ -106,6 +131,7 @@ export function buildTradeSearchParams(input: TradeSearchInput): TradeSearchPara
     member,
     transactionType: normalizedTransactionType,
     symbol,
+    sort,
     limit: parseLimit(input.limit, 20, 100),
     offset: parseOffset(input.offset, 0),
     hasFilters: Boolean(from || to || member || normalizedTransactionType || symbol),
@@ -137,6 +163,34 @@ export function computeTradePriceSnapshot(input: PriceSnapshotInput) {
     currentPriceAsOf: currentPrice != null ? input.currentPriceAsOf ?? null : null,
     priceChangeSinceTrade,
     priceChangePercentSinceTrade,
+  };
+}
+
+export function computeTradeShareSnapshot(input: ShareSnapshotInput) {
+  const storedShareCount = asFiniteNumber(input.storedShareCount);
+  const rawShareCountSource = input.rawShareCountSource === "pdf_exact"
+    || input.rawShareCountSource === "estimated_from_amount_and_close"
+    ? input.rawShareCountSource
+    : null;
+  if (storedShareCount != null && rawShareCountSource != null) {
+    return {
+      shareCount: storedShareCount,
+      shareCountSource: rawShareCountSource,
+    };
+  }
+
+  const tradeDateClosePrice = asFiniteNumber(input.tradeDateClosePrice);
+  const estimatedTradeValue = asFiniteNumber(input.estimatedTradeValue) ?? parseAmountRangeMidpoint(input.amountRange);
+  if (tradeDateClosePrice != null && estimatedTradeValue != null && tradeDateClosePrice !== 0) {
+    return {
+      shareCount: roundShareCount(estimatedTradeValue / tradeDateClosePrice),
+      shareCountSource: "estimated_from_amount_and_close" as const,
+    };
+  }
+
+  return {
+    shareCount: storedShareCount,
+    shareCountSource: rawShareCountSource,
   };
 }
 

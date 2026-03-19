@@ -1,13 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "./db-types";
-import { ensureOrganization, materializeMemberRelationships, normalizeOrganizationName, resolveOrganizationId } from "./relationships";
+import type { Database } from "./db-types.ts";
+import { ensureOrganization, materializeMemberRelationships, normalizeOrganizationName, resolveOrganizationId } from "./relationships.ts";
 import {
   SenateEfdUnavailableError,
   isSenateMaintenanceResponse,
   shouldRetrySenateEfdRequest,
   summarizeUpstreamHtml,
-} from "./senate-efd";
-import { sanitizeJsonStrings, sanitizePostgresText } from "./unicode-safety";
+} from "./senate-efd.ts";
+import { sanitizeJsonStrings, sanitizePostgresText } from "./unicode-safety.ts";
 
 type DbClient = SupabaseClient;
 type JsonRecord = Record<string, unknown>;
@@ -81,6 +81,8 @@ type ParsedTradeRow = {
   transactionDate: string | null;
   notificationDate: string | null;
   amountRange: string | null;
+  shareCount: number | null;
+  shareCountSource: "pdf_exact" | null;
   isPublicEquity: boolean;
   parseConfidence: string;
   quarantineReason: string | null;
@@ -116,6 +118,13 @@ function toIsoDate(value: string | null | undefined): string | null {
   const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString().slice(0, 10);
+}
+
+function extractExplicitShareCount(text: string): number | null {
+  const match = text.match(/\b(\d[\d,]*(?:\.\d+)?)\s*(?:shares?|shrs?)\b/i);
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[1]!.replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function isDateInWindow(value: string | null, from: string, to: string): boolean {
@@ -433,6 +442,7 @@ function parseHouseTradeRowsFromText(text: string): ParsedTradeRow[] {
     const dates = [...joinedDetails.matchAll(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g)].map((match) => match[0]);
     const amountMatch = joinedDetails.match(AMOUNT_RANGE_RE);
     if (!amountMatch) continue;
+    const shareCount = extractExplicitShareCount(joinedDetails);
 
     while (i < lines.length && !ownerStartRe.test(lines[i]) && !footerRe.test(lines[i])) {
       i += 1;
@@ -456,11 +466,15 @@ function parseHouseTradeRowsFromText(text: string): ParsedTradeRow[] {
       transactionDate: toIsoDate(dates[0] ?? null),
       notificationDate: toIsoDate(dates[1] ?? null),
       amountRange: amountMatch[0],
+      shareCount,
+      shareCountSource: shareCount != null ? "pdf_exact" : null,
       isPublicEquity: assetClassification.isPublicEquity,
       parseConfidence: symbolGuess ? "high" : assetClassification.isPublicEquity ? "medium" : "low",
       quarantineReason: assetClassification.quarantineReason,
       rawPayload: {
         rawText,
+        shareCount,
+        shareCountSource: shareCount != null ? "pdf_exact" : null,
       },
     });
   }
@@ -501,6 +515,7 @@ function parseGenericTradeRowsFromText(text: string): ParsedTradeRow[] {
     const dates = [...afterTradeType.matchAll(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g)].map((match) => match[0]);
     const transactionDate = toIsoDate(dates[0] ?? null);
     const notificationDate = toIsoDate(dates[1] ?? null);
+    const shareCount = extractExplicitShareCount(joined);
     const symbolGuess = extractTickerGuess(beforeTradeType);
     const assetClassification = classifyAsset(beforeTradeType, symbolGuess);
 
@@ -516,11 +531,15 @@ function parseGenericTradeRowsFromText(text: string): ParsedTradeRow[] {
       transactionDate,
       notificationDate,
       amountRange,
+      shareCount,
+      shareCountSource: shareCount != null ? "pdf_exact" : null,
       isPublicEquity: assetClassification.isPublicEquity,
       parseConfidence: symbolGuess ? "high" : assetClassification.isPublicEquity ? "medium" : "low",
       quarantineReason: assetClassification.quarantineReason,
       rawPayload: {
         rawText: joined,
+        shareCount,
+        shareCountSource: shareCount != null ? "pdf_exact" : null,
       },
     });
   };
@@ -543,7 +562,7 @@ function parseGenericTradeRowsFromText(text: string): ParsedTradeRow[] {
   return rows;
 }
 
-function parseTradeRowsFromText(text: string): ParsedTradeRow[] {
+export function parseTradeRowsFromText(text: string): ParsedTradeRow[] {
   return isHouseDisclosureText(text)
     ? parseHouseTradeRowsFromText(text)
     : parseGenericTradeRowsFromText(text);
@@ -796,6 +815,7 @@ async function normalizeTradeRowsForFiling(
       disclosure_date: filing.disclosure_date ?? filing.filed_date,
       transaction_type: row.transaction_type,
       amount_range: row.amount_range,
+      share_count: typeof row.raw_payload?.shareCount === "number" ? row.raw_payload.shareCount : null,
       owner_label: row.owner_label,
       owner_type: row.owner_type,
       asset_type: row.asset_type,
