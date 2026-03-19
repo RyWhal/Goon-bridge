@@ -10,11 +10,12 @@ import {
 import { SenateEfdUnavailableError } from "../lib/senate-efd";
 import {
   buildTradeSearchParams,
+  computeTradeShareSnapshot,
   createTradePriceRequestCache,
   enrichTradeWithPrices,
   preloadTradePriceCache,
 } from "../lib/stock-trades.ts";
-import { hasSupabase, isValidDate, parseLimit } from "../lib/validation";
+import { hasSupabase, isValidDate, parseLimit, parseOffset } from "../lib/validation";
 
 const disclosures = new Hono<Env>();
 
@@ -91,6 +92,10 @@ function mapTradeRecord(
   const executionClosePrice = typeof trade.raw_payload?.executionClosePrice === "number"
     ? trade.raw_payload.executionClosePrice
     : null;
+  const shareCountSource = trade.raw_payload?.shareCountSource === "pdf_exact"
+    || trade.raw_payload?.shareCountSource === "estimated_from_amount_and_close"
+    ? trade.raw_payload.shareCountSource
+    : null;
 
   const organization = trade.organization_id != null ? organizations.get(trade.organization_id) ?? null : null;
   const filing = trade.disclosure_filing_id != null ? filings.get(trade.disclosure_filing_id) ?? null : null;
@@ -109,6 +114,7 @@ function mapTradeRecord(
     estimated_trade_value: estimatedTradeValue,
     execution_close_price: executionClosePrice,
     share_count: trade.share_count,
+    share_count_source: shareCountSource,
     owner_label: trade.owner_label,
     owner_type: trade.owner_type,
     asset_type: trade.asset_type,
@@ -152,12 +158,21 @@ async function mapTradeRecordWithPrices(
 ) {
   const record = mapTradeRecord(trade, organizations, filings);
   const pricing = await enrichTradeWithPrices(sb, env, requestCache, trade);
+  const shareSnapshot = computeTradeShareSnapshot({
+    storedShareCount: record.share_count,
+    rawShareCountSource: record.share_count_source,
+    amountRange: record.amount_range,
+    estimatedTradeValue: record.estimated_trade_value,
+    tradeDateClosePrice: pricing.tradeDateClosePrice,
+  });
   return {
     ...record,
     trade_date_close_price: pricing.tradeDateClosePrice,
     trade_date_price_source: pricing.tradeDatePriceSource,
     current_price: pricing.currentPrice,
     current_price_as_of: pricing.currentPriceAsOf,
+    share_count: shareSnapshot.shareCount,
+    share_count_source: shareSnapshot.shareCountSource,
     price_change_since_trade: pricing.priceChangeSinceTrade,
     price_change_percent_since_trade: pricing.priceChangePercentSinceTrade,
     ...(member !== undefined ? { member } : {}),
@@ -247,14 +262,16 @@ disclosures.get("/trades/recent", async (c) => {
 
   const sb = getSupabase(c.env);
   const limit = parseLimit(c.req.query("limit"), 25, 100);
+  const offset = parseOffset(c.req.query("offset"), 0);
   const transactionType = c.req.query("transaction_type");
+  const sort = c.req.query("sort") === "disclosure_date" ? "disclosure_date" : "trade_date";
 
   let query = sb
     .from("member_stock_trades")
     .select("*", { count: "exact" })
-    .order("transaction_date", { ascending: false, nullsFirst: false })
+    .order(sort === "disclosure_date" ? "disclosure_date" : "transaction_date", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .range(offset, offset + limit - 1);
 
   if (transactionType) {
     query = query.eq("transaction_type", transactionType);
@@ -283,6 +300,9 @@ disclosures.get("/trades/recent", async (c) => {
   return c.json(
     {
       count: count ?? trades?.length ?? 0,
+      sort,
+      limit,
+      offset,
       trades: await Promise.all((trades ?? []).map((trade) =>
         mapTradeRecordWithPrices(
           sb,
@@ -311,6 +331,7 @@ disclosures.get("/trades/search", async (c) => {
     member: c.req.query("member"),
     transaction_type: c.req.query("transaction_type"),
     symbol: c.req.query("symbol"),
+    sort: c.req.query("sort"),
     limit: c.req.query("limit"),
     offset: c.req.query("offset"),
   });
@@ -346,7 +367,7 @@ disclosures.get("/trades/search", async (c) => {
   let query = sb
     .from("member_stock_trades")
     .select("*", { count: "exact" })
-    .order("transaction_date", { ascending: false, nullsFirst: false })
+    .order(params.sort === "disclosure_date" ? "disclosure_date" : "transaction_date", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
     .range(params.offset, params.offset + params.limit - 1);
 
@@ -379,6 +400,7 @@ disclosures.get("/trades/search", async (c) => {
   return c.json(
     {
       count: count ?? trades?.length ?? 0,
+      sort: params.sort,
       limit: params.limit,
       offset: params.offset,
       trades: await Promise.all((trades ?? []).map((trade) =>

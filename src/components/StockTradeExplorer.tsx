@@ -1,5 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
-import { useApi } from "../hooks/useApi";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  appendTradePage,
+  buildTradesUrl,
+  describeShareCount,
+  type FilterState,
+  type SortMode,
+  type TransactionFilter,
+} from "../lib/stock-trade-feed";
 
 interface MemberRecord {
   bioguide_id?: string;
@@ -26,6 +33,7 @@ interface TradeRecord {
   estimated_trade_value: number | null;
   execution_close_price: number | null;
   share_count: number | null;
+  share_count_source: "pdf_exact" | "estimated_from_amount_and_close" | null;
   owner_label: string | null;
   owner_type: string | null;
   asset_type: string | null;
@@ -53,18 +61,9 @@ interface TradesResponse {
   count: number;
   limit?: number;
   offset?: number;
+  sort?: SortMode;
   trades: TradeRecord[];
 }
-
-type TransactionFilter = "all" | "purchase" | "sale" | "exchange";
-
-type FilterState = {
-  from: string;
-  to: string;
-  member: string;
-  symbol: string;
-  transactionType: TransactionFilter;
-};
 
 const EMPTY_FILTERS: FilterState = {
   from: "",
@@ -151,22 +150,32 @@ function formatPercent(value?: number | null) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
-function buildTradesUrl(filters: FilterState) {
-  const hasFilters = Boolean(
-    filters.from || filters.to || filters.member.trim() || filters.symbol.trim() || filters.transactionType !== "all",
-  );
+const PAGE_SIZE = 20;
 
-  if (!hasFilters) {
-    return "/api/disclosures/trades/recent?limit=20";
+async function fetchTradesPage(url: string) {
+  const resp = await fetch(url);
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    let errorMsg = `HTTP ${resp.status}`;
+    try {
+      const err = JSON.parse(text) as Record<string, unknown>;
+      errorMsg =
+        (err.error as string) ||
+        (err.detail as string) ||
+        (err.message as string) ||
+        errorMsg;
+    } catch {
+      const snippet = text.replace(/<[^>]*>/g, " ").trim().slice(0, 200);
+      if (snippet) errorMsg += `: ${snippet}`;
+    }
+    throw new Error(errorMsg);
   }
 
-  const params = new URLSearchParams({ limit: "20", offset: "0" });
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
-  if (filters.member.trim()) params.set("member", filters.member.trim());
-  if (filters.symbol.trim()) params.set("symbol", filters.symbol.trim().toUpperCase());
-  if (filters.transactionType !== "all") params.set("transaction_type", filters.transactionType);
-  return `/api/disclosures/trades/search?${params.toString()}`;
+  const data = JSON.parse(text) as TradesResponse & { error?: string; detail?: string };
+  if (data.error) {
+    throw new Error(data.detail ? `${data.error}: ${data.detail}` : data.error);
+  }
+  return data;
 }
 
 function PartyBadge({ party }: { party?: string | null }) {
@@ -212,28 +221,87 @@ export function StockTradeExplorer() {
   const [draftFilters, setDraftFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [appliedFilters, setAppliedFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [selectedTradeId, setSelectedTradeId] = useState<number | null>(null);
+  const [sortMode, setSortMode] = useState<SortMode>("trade_date");
+  const [tradeRows, setTradeRows] = useState<TradeRecord[]>([]);
+  const [tradeCount, setTradeCount] = useState(0);
+  const [loadingInitial, setLoadingInitial] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [tradeError, setTradeError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const requestTokenRef = useRef(0);
+  const queryKey = JSON.stringify({ appliedFilters, sortMode });
 
-  const trades = useApi<TradesResponse>();
+  const loadTradePage = useCallback(async (offset: number, mode: "replace" | "append") => {
+    const requestToken = mode === "replace" ? requestTokenRef.current + 1 : requestTokenRef.current;
+    if (mode === "replace") {
+      requestTokenRef.current = requestToken;
+      setLoadingInitial(true);
+      setTradeError(null);
+    } else {
+      setLoadingMore(true);
+    }
+
+    try {
+      const data = await fetchTradesPage(buildTradesUrl(appliedFilters, sortMode, PAGE_SIZE, offset));
+      if (requestToken !== requestTokenRef.current) return;
+
+      setTradeCount(data.count ?? 0);
+      setTradeRows((current) => mode === "replace" ? data.trades : appendTradePage(current, data.trades));
+      const nextOffset = offset + data.trades.length;
+      setHasMore(nextOffset < (data.count ?? 0) && data.trades.length > 0);
+    } catch (error) {
+      if (requestToken !== requestTokenRef.current) return;
+      setTradeError(error instanceof Error ? error.message : "Failed to load trades");
+      if (mode === "replace") {
+        setTradeRows([]);
+        setTradeCount(0);
+        setHasMore(false);
+      }
+    } finally {
+      if (requestToken === requestTokenRef.current) {
+        setLoadingInitial(false);
+        setLoadingMore(false);
+      }
+    }
+  }, [appliedFilters, sortMode]);
 
   useEffect(() => {
-    void trades.fetchData(buildTradesUrl(appliedFilters), { force: true, ttlMs: 60_000 });
-  }, [appliedFilters, trades.fetchData]);
+    void loadTradePage(0, "replace");
+  }, [loadTradePage, queryKey]);
 
   useEffect(() => {
-    const rows = trades.data?.trades ?? [];
-    if (!rows.length) {
+    if (!tradeRows.length) {
       setSelectedTradeId(null);
       return;
     }
 
-    if (selectedTradeId == null || !rows.some((trade) => trade.id === selectedTradeId)) {
-      setSelectedTradeId(rows[0]?.id ?? null);
+    if (selectedTradeId == null || !tradeRows.some((trade) => trade.id === selectedTradeId)) {
+      setSelectedTradeId(tradeRows[0]?.id ?? null);
     }
-  }, [selectedTradeId, trades.data?.trades]);
+  }, [selectedTradeId, tradeRows]);
+
+  useEffect(() => {
+    const node = sentinelRef.current;
+    const root = scrollContainerRef.current;
+    if (!node || !root || !hasMore || loadingInitial || loadingMore || tradeError) return;
+
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      void loadTradePage(tradeRows.length, "append");
+    }, {
+      root,
+      rootMargin: "300px 0px",
+    });
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, loadTradePage, loadingInitial, loadingMore, tradeError, tradeRows.length]);
 
   const selectedTrade = useMemo(
-    () => (trades.data?.trades ?? []).find((trade) => trade.id === selectedTradeId) ?? null,
-    [selectedTradeId, trades.data?.trades],
+    () => tradeRows.find((trade) => trade.id === selectedTradeId) ?? null,
+    [selectedTradeId, tradeRows],
   );
   const hasActiveFilters = Boolean(
     appliedFilters.from
@@ -262,7 +330,7 @@ export function StockTradeExplorer() {
     setAppliedFilters(EMPTY_FILTERS);
   };
 
-  const countLabel = trades.data?.count ?? 0;
+  const countLabel = tradeCount;
   const selectedMemberName = selectedTrade?.member?.direct_order_name ?? selectedTrade?.member?.name ?? selectedTrade?.bioguide_id;
   const selectedChamber = normalizeChamber(selectedTrade?.member?.chamber);
 
@@ -276,6 +344,10 @@ export function StockTradeExplorer() {
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-vibe-dim">
               Browse the latest normalized congressional stock trades with server-side filtering and cached stock pricing from Finnhub.
+            </p>
+            <p className="mt-2 max-w-3xl text-xs text-vibe-dim">
+              For research only. This information is not financial advice and may be incomplete, delayed, or estimated.
+              {" "}Verify the underlying disclosures and do your own research before making decisions.
             </p>
           </div>
           <span className="badge bg-vibe-money/20 text-vibe-money uppercase tracking-wider">
@@ -347,46 +419,74 @@ export function StockTradeExplorer() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="card overflow-hidden">
+        <div className="card flex flex-col overflow-hidden xl:h-[920px]">
           <div className="flex items-center justify-between gap-3 border-b border-vibe-border pb-3">
             <div>
               <h3 className="text-xs uppercase tracking-[0.2em] text-vibe-dim">Trade Feed</h3>
               <p className="mt-1 text-sm text-vibe-dim">
-                {hasActiveFilters ? "Filtered trade results from the disclosure cache." : "Latest 20 trades by default."}
+                {sortMode === "trade_date"
+                  ? hasActiveFilters
+                    ? "Filtered trade results sorted by latest trade date."
+                    : "Latest 20 trades by trade date."
+                  : hasActiveFilters
+                    ? "Filtered trade results sorted by latest disclosure date."
+                    : "Latest 20 trades by disclosure date."}
               </p>
             </div>
-            <span className="text-sm text-vibe-dim">{countLabel} match{countLabel === 1 ? "" : "es"}</span>
+            <div className="flex items-center gap-3">
+              <div className="inline-flex rounded-md border border-vibe-border bg-vibe-surface/70 p-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setSortMode("trade_date")}
+                  className={`rounded px-2 py-1 transition-colors ${
+                    sortMode === "trade_date" ? "bg-vibe-accent text-white" : "text-vibe-dim hover:text-vibe-text"
+                  }`}
+                >
+                  Latest Trades
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSortMode("disclosure_date")}
+                  className={`rounded px-2 py-1 transition-colors ${
+                    sortMode === "disclosure_date" ? "bg-vibe-accent text-white" : "text-vibe-dim hover:text-vibe-text"
+                  }`}
+                >
+                  Latest Disclosures
+                </button>
+              </div>
+              <span className="text-sm text-vibe-dim">{countLabel} match{countLabel === 1 ? "" : "es"}</span>
+            </div>
           </div>
 
-          {trades.loading && <div className="py-6 text-sm text-vibe-dim">Loading trades…</div>}
-          {trades.error && !trades.loading && (
-            <div className="mt-4 rounded-xl border border-vibe-nay/30 bg-vibe-nay/10 p-3 text-sm text-vibe-nay">
-              {trades.error}
-            </div>
-          )}
+          <div ref={scrollContainerRef} className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+            {loadingInitial && <div className="py-6 text-sm text-vibe-dim">Loading trades…</div>}
+            {tradeError && !loadingInitial && (
+              <div className="rounded-xl border border-vibe-nay/30 bg-vibe-nay/10 p-3 text-sm text-vibe-nay">
+                {tradeError}
+              </div>
+            )}
 
-          {!trades.loading && !trades.error && !(trades.data?.trades.length) && (
-            <div className="py-6 text-sm text-vibe-dim">
-              No trades matched the current filters.
-            </div>
-          )}
+            {!loadingInitial && !tradeError && !tradeRows.length && (
+              <div className="py-6 text-sm text-vibe-dim">
+                No trades matched the current filters.
+              </div>
+            )}
 
-          {!trades.loading && !trades.error && (trades.data?.trades.length ?? 0) > 0 && (
-            <div className="mt-4">
+            {!loadingInitial && !tradeError && tradeRows.length > 0 && (
               <table className="w-full table-fixed border-separate border-spacing-0 text-left">
                 <thead>
                   <tr className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">
-                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Trade Date</th>
-                    <th className="w-[26%] border-b border-vibe-border px-2.5 py-2 font-medium">Member</th>
-                    <th className="w-[13%] border-b border-vibe-border px-2.5 py-2 font-medium">Type</th>
-                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Ticker</th>
-                    <th className="w-[20%] border-b border-vibe-border px-2.5 py-2 font-medium">Amount</th>
-                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Trade-Day</th>
-                    <th className="w-[11%] border-b border-vibe-border px-2.5 py-2 font-medium">Current</th>
+                    <th className="sticky top-0 z-10 w-[10%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Trade Date</th>
+                    <th className="sticky top-0 z-10 w-[26%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Member</th>
+                    <th className="sticky top-0 z-10 w-[13%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Type</th>
+                    <th className="sticky top-0 z-10 w-[10%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Ticker</th>
+                    <th className="sticky top-0 z-10 w-[20%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Amount</th>
+                    <th className="sticky top-0 z-10 w-[10%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Trade-Day</th>
+                    <th className="sticky top-0 z-10 w-[11%] border-b border-vibe-border bg-vibe-bg px-2.5 py-2 font-medium">Current</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {trades.data?.trades.map((trade) => {
+                  {tradeRows.map((trade) => {
                     const isSelected = trade.id === selectedTradeId;
                     const compactTradeDate = formatCompactTradeDate(trade.transaction_date);
                     return (
@@ -429,8 +529,10 @@ export function StockTradeExplorer() {
                   })}
                 </tbody>
               </table>
-            </div>
-          )}
+            )}
+            <div ref={sentinelRef} className="h-4" />
+            {loadingMore && <div className="py-3 text-sm text-vibe-dim">Loading more trades…</div>}
+          </div>
         </div>
 
         <div className="card">
@@ -496,6 +598,12 @@ export function StockTradeExplorer() {
                   <div className="flex items-center justify-between gap-3">
                     <dt className="text-vibe-dim">Estimated Value</dt>
                     <dd className="text-vibe-text">{formatCurrency(selectedTrade.estimated_trade_value)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Share Count</dt>
+                    <dd className="text-vibe-text">
+                      {describeShareCount(selectedTrade.share_count, selectedTrade.share_count_source)}
+                    </dd>
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <dt className="text-vibe-dim">Trade Price Source</dt>
