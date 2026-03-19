@@ -25,6 +25,12 @@ export interface Database {
         Update: Partial<MemberDetailsCacheInsert>;
         Relationships: [];
       };
+      google_autocomplete_cache: {
+        Row: GoogleAutocompleteCacheRow;
+        Insert: GoogleAutocompleteCacheInsert;
+        Update: Partial<GoogleAutocompleteCacheInsert>;
+        Relationships: [];
+      };
       votes: {
         Row: VotesRow;
         Insert: VotesInsert;
@@ -277,6 +283,22 @@ interface MemberDetailsCacheRow {
 
 interface MemberDetailsCacheInsert {
   bioguide_id: string;
+  payload: unknown;
+  updated_at?: string;
+}
+
+interface GoogleAutocompleteCacheRow {
+  bioguide_id: string;
+  probe_key: string;
+  query: string;
+  payload: unknown;
+  updated_at: string;
+}
+
+interface GoogleAutocompleteCacheInsert {
+  bioguide_id: string;
+  probe_key: string;
+  query: string;
   payload: unknown;
   updated_at?: string;
 }
