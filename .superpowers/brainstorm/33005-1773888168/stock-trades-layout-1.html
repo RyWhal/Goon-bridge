@@ -1,0 +1,159 @@
+<h2>Stock Trades Layout</h2>
+<p class="subtitle">Dense trade table with filter bar and a right-side details drawer.</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">Trades Explorer</div>
+    <div class="mockup-body" style="display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;background:#f6f1e6;">
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div style="background:#fffaf0;border:1px solid #d8cbb2;border-radius:14px;padding:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;">
+            <div>
+              <div class="label">Filters</div>
+              <div style="font-size:14px;color:#5a5448;">Narrow by member, date, transaction type, or ticker.</div>
+            </div>
+            <div style="font-size:12px;color:#5a5448;">1,284 rows</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 0.8fr 0.8fr;gap:10px;">
+            <div>
+              <div class="label">Member</div>
+              <input class="mock-input" value="Nancy Pelosi" />
+            </div>
+            <div>
+              <div class="label">Date Range</div>
+              <input class="mock-input" value="2024-01-01 to 2024-12-31" />
+            </div>
+            <div>
+              <div class="label">Trade Type</div>
+              <input class="mock-input" value="Purchases / Sales / Exchange" />
+            </div>
+            <div>
+              <div class="label">Ticker</div>
+              <input class="mock-input" value="NVDA" />
+            </div>
+            <div>
+              <div class="label">Actions</div>
+              <div style="display:flex;gap:8px;">
+                <button class="mock-button" style="flex:1;">Apply</button>
+                <button class="mock-button" style="flex:1;background:#efe4ca;color:#4c4639;">Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:#fffaf0;border:1px solid #d8cbb2;border-radius:14px;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:118px 182px 92px 80px 1fr 110px 120px 120px;gap:0;background:#efe4ca;border-bottom:1px solid #d8cbb2;padding:10px 12px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#5a5448;">
+            <div>Trade Date</div>
+            <div>Member</div>
+            <div>Type</div>
+            <div>Ticker</div>
+            <div>Asset</div>
+            <div>Amount</div>
+            <div>Trade-Day Price</div>
+            <div>Current Price</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:118px 182px 92px 80px 1fr 110px 120px 120px;padding:12px;border-bottom:1px solid #ece1c9;background:#fff6dc;box-shadow:inset 3px 0 0 #b45309;font-size:13px;color:#2f2a22;">
+            <div>Jun 14, 2024</div>
+            <div>Nancy Pelosi</div>
+            <div><span style="padding:2px 8px;border-radius:999px;background:#dff6e7;color:#25643b;font-size:11px;">Purchase</span></div>
+            <div>NVDA</div>
+            <div>NVIDIA Corp</div>
+            <div>$250k-$500k</div>
+            <div>$131.88</div>
+            <div>$137.42</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:118px 182px 92px 80px 1fr 110px 120px 120px;padding:12px;border-bottom:1px solid #ece1c9;background:white;font-size:13px;color:#2f2a22;">
+            <div>Jun 13, 2024</div>
+            <div>Dan Crenshaw</div>
+            <div><span style="padding:2px 8px;border-radius:999px;background:#fde7db;color:#9a3412;font-size:11px;">Sale</span></div>
+            <div>AAPL</div>
+            <div>Apple Inc</div>
+            <div>$50k-$100k</div>
+            <div>$214.24</div>
+            <div>$219.11</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:118px 182px 92px 80px 1fr 110px 120px 120px;padding:12px;border-bottom:1px solid #ece1c9;background:white;font-size:13px;color:#2f2a22;">
+            <div>Jun 11, 2024</div>
+            <div>Debbie Wasserman Schultz</div>
+            <div><span style="padding:2px 8px;border-radius:999px;background:#e8ecff;color:#4338ca;font-size:11px;">Exchange</span></div>
+            <div>MSFT</div>
+            <div>Microsoft Corp</div>
+            <div>$15k-$50k</div>
+            <div>$425.22</div>
+            <div>$431.87</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:118px 182px 92px 80px 1fr 110px 120px 120px;padding:12px;background:white;font-size:13px;color:#2f2a22;">
+            <div>Jun 10, 2024</div>
+            <div>Ro Khanna</div>
+            <div><span style="padding:2px 8px;border-radius:999px;background:#dff6e7;color:#25643b;font-size:11px;">Purchase</span></div>
+            <div>GOOGL</div>
+            <div>Alphabet Inc</div>
+            <div>$1k-$15k</div>
+            <div>$177.08</div>
+            <div>$181.62</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="background:#fffaf0;border:1px solid #d8cbb2;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+          <div>
+            <div class="label">Selected Trade</div>
+            <h3 style="margin:6px 0 2px;">Nancy Pelosi</h3>
+            <div style="font-size:13px;color:#5a5448;">Purchase of NVIDIA Corp on Jun 14, 2024</div>
+          </div>
+          <div style="padding:4px 10px;border-radius:999px;background:#e7f7ec;color:#25643b;font-size:11px;text-transform:uppercase;">Purchase</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div style="background:#f7edd5;border-radius:12px;padding:12px;">
+            <div class="label">Trade-Day Close</div>
+            <div style="font-size:28px;font-weight:700;color:#2f2a22;">$131.88</div>
+          </div>
+          <div style="background:#f7edd5;border-radius:12px;padding:12px;">
+            <div class="label">Current Price</div>
+            <div style="font-size:28px;font-weight:700;color:#2f2a22;">$137.42</div>
+          </div>
+        </div>
+
+        <div style="background:#f7edd5;border-radius:12px;padding:12px;display:grid;gap:8px;">
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span class="label">Ticker</span><strong>NVDA</strong></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span class="label">Amount Range</span><strong>$250,001-$500,000</strong></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span class="label">Estimated Value</span><strong>$375,000</strong></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span class="label">Owner</span><strong>Spouse</strong></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span class="label">Filed</span><strong>Jul 08, 2024</strong></div>
+        </div>
+
+        <div style="background:#f7edd5;border-radius:12px;padding:12px;">
+          <div class="label">Drill In</div>
+          <div style="font-size:13px;color:#5a5448;margin:6px 0 10px;">Use this panel for source link, parse confidence, organization record, and any raw disclosure context.</div>
+          <div style="display:flex;gap:8px;">
+            <button class="mock-button" style="flex:1;">Open Source Filing</button>
+            <button class="mock-button" style="flex:1;background:#efe4ca;color:#4c4639;">View Stock</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="works" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>This layout works</h3>
+      <p>Keep the dense table plus right-side drawer as the base direction.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Needs adjustment</h3>
+      <p>The table/drawer pattern is right, but some columns or filter placement should change.</p>
+    </div>
+  </div>
+</div>

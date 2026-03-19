@@ -8,6 +8,11 @@ import {
   refreshSenateDisclosures,
 } from "../lib/disclosures";
 import { SenateEfdUnavailableError } from "../lib/senate-efd";
+import {
+  buildTradeSearchParams,
+  createTradePriceRequestCache,
+  enrichTradeWithPrices,
+} from "../lib/stock-trades.ts";
 import { hasSupabase, isValidDate, parseLimit } from "../lib/validation";
 
 const disclosures = new Hono<Env>();
@@ -127,6 +132,37 @@ function mapTradeRecord(
   };
 }
 
+async function mapTradeRecordWithPrices(
+  sb: ReturnType<typeof getSupabase>,
+  env: Env["Bindings"],
+  requestCache: ReturnType<typeof createTradePriceRequestCache>,
+  trade: Parameters<typeof mapTradeRecord>[0],
+  organizations: Parameters<typeof mapTradeRecord>[1],
+  filings: Parameters<typeof mapTradeRecord>[2],
+  member?: {
+    bioguide_id: string;
+    name: string;
+    direct_order_name: string | null;
+    party: string | null;
+    state: string | null;
+    chamber: string | null;
+    image_url: string | null;
+  } | null,
+) {
+  const record = mapTradeRecord(trade, organizations, filings);
+  const pricing = await enrichTradeWithPrices(sb, env, requestCache, trade);
+  return {
+    ...record,
+    trade_date_close_price: pricing.tradeDateClosePrice,
+    trade_date_price_source: pricing.tradeDatePriceSource,
+    current_price: pricing.currentPrice,
+    current_price_as_of: pricing.currentPriceAsOf,
+    price_change_since_trade: pricing.priceChangeSinceTrade,
+    price_change_percent_since_trade: pricing.priceChangePercentSinceTrade,
+    ...(member !== undefined ? { member } : {}),
+  };
+}
+
 // ── GET /api/disclosures/members/with-trades ────────────────────────────────
 disclosures.get("/members/with-trades", async (c) => {
   if (!hasSupabase(c.env)) {
@@ -240,17 +276,121 @@ disclosures.get("/trades/recent", async (c) => {
 
   if (memberError) return c.json({ error: memberError.message }, 500);
   const memberMap = new Map((members ?? []).map((entry) => [entry.bioguide_id, entry]));
+  const requestCache = createTradePriceRequestCache();
 
   return c.json(
     {
       count: count ?? trades?.length ?? 0,
-      trades: (trades ?? []).map((trade) => ({
-        ...mapTradeRecord(trade, organizations, filings),
-        member: memberMap.get(trade.bioguide_id) ?? null,
-      })),
+      trades: await Promise.all((trades ?? []).map((trade) =>
+        mapTradeRecordWithPrices(
+          sb,
+          c.env,
+          requestCache,
+          trade,
+          organizations,
+          filings,
+          memberMap.get(trade.bioguide_id) ?? null,
+        ))),
     },
     200,
     { "Cache-Control": "public, max-age=300" }
+  );
+});
+
+// ── GET /api/disclosures/trades/search ───────────────────────────────────────
+disclosures.get("/trades/search", async (c) => {
+  if (!hasSupabase(c.env)) {
+    return c.json({ error: "Supabase not configured" }, 503);
+  }
+
+  const params = buildTradeSearchParams({
+    from: c.req.query("from"),
+    to: c.req.query("to"),
+    member: c.req.query("member"),
+    transaction_type: c.req.query("transaction_type"),
+    symbol: c.req.query("symbol"),
+    limit: c.req.query("limit"),
+    offset: c.req.query("offset"),
+  });
+  if ("error" in params) return c.json(params, 400);
+
+  const sb = getSupabase(c.env);
+  let memberIds: string[] | null = null;
+
+  if (params.member) {
+    const memberTerm = params.member.replace(/[,%]/g, " ").trim();
+    const { data: matchingMembers, error: memberError } = await sb
+      .from("members")
+      .select("bioguide_id")
+      .or(`name.ilike.%${memberTerm}%,direct_order_name.ilike.%${memberTerm}%`)
+      .limit(100);
+    if (memberError) return c.json({ error: memberError.message }, 500);
+
+    memberIds = [...new Set((matchingMembers ?? []).map((entry) => entry.bioguide_id))];
+    if (!memberIds.length) {
+      return c.json(
+        {
+          count: 0,
+          limit: params.limit,
+          offset: params.offset,
+          trades: [],
+        },
+        200,
+        { "Cache-Control": "public, max-age=60" }
+      );
+    }
+  }
+
+  let query = sb
+    .from("member_stock_trades")
+    .select("*", { count: "exact" })
+    .order("transaction_date", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .range(params.offset, params.offset + params.limit - 1);
+
+  if (params.from) query = query.gte("transaction_date", params.from);
+  if (params.to) query = query.lte("transaction_date", params.to);
+  if (params.transactionType) query = query.eq("transaction_type", params.transactionType);
+  if (params.symbol) query = query.eq("symbol", params.symbol);
+  if (memberIds) query = query.in("bioguide_id", memberIds);
+
+  const { data: trades, error, count } = await query;
+  if (error) return c.json({ error: error.message }, 500);
+
+  const bioguideIds = [...new Set((trades ?? []).map((trade) => trade.bioguide_id))];
+  const organizationIds = [...new Set((trades ?? []).map((trade) => trade.organization_id).filter((value): value is number => value != null))];
+  const filingIds = [...new Set((trades ?? []).map((trade) => trade.disclosure_filing_id).filter((value): value is number => value != null))];
+
+  const [{ data: members, error: memberError }, organizations, filings] = await Promise.all([
+    bioguideIds.length
+      ? sb.from("members").select("bioguide_id,name,direct_order_name,party,state,chamber,image_url").in("bioguide_id", bioguideIds)
+      : Promise.resolve({ data: [], error: null }),
+    fetchOrganizationsByIds(sb, organizationIds),
+    fetchFilingsByIds(sb, filingIds),
+  ]);
+  if (memberError) return c.json({ error: memberError.message }, 500);
+
+  const memberMap = new Map((members ?? []).map((entry) => [entry.bioguide_id, entry]));
+  const requestCache = createTradePriceRequestCache();
+
+  return c.json(
+    {
+      count: count ?? trades?.length ?? 0,
+      limit: params.limit,
+      offset: params.offset,
+      trades: await Promise.all((trades ?? []).map((trade) =>
+        mapTradeRecordWithPrices(
+          sb,
+          c.env,
+          requestCache,
+          trade,
+          organizations,
+          filings,
+          memberMap.get(trade.bioguide_id) ?? null,
+        ))),
+    },
+    200,
+    { "Cache-Control": "public, max-age=60" }
   );
 });
 
@@ -295,13 +435,15 @@ disclosures.get("/member/:bioguideId/trades", async (c) => {
     fetchOrganizationsByIds(sb, organizationIds),
     fetchFilingsByIds(sb, filingIds),
   ]);
+  const requestCache = createTradePriceRequestCache();
 
   return c.json(
     {
       bioguide_id: bioguideId,
       member,
       count: count ?? trades?.length ?? 0,
-      trades: (trades ?? []).map((trade) => mapTradeRecord(trade, organizations, filings)),
+      trades: await Promise.all((trades ?? []).map((trade) =>
+        mapTradeRecordWithPrices(sb, c.env, requestCache, trade, organizations, filings))),
     },
     200,
     { "Cache-Control": "public, max-age=300" }

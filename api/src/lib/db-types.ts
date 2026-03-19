@@ -157,6 +157,18 @@ export interface Database {
         Update: Partial<MemberStockTradesInsert>;
         Relationships: [];
       };
+      stock_price_history_cache: {
+        Row: StockPriceHistoryCacheRow;
+        Insert: StockPriceHistoryCacheInsert;
+        Update: Partial<StockPriceHistoryCacheInsert>;
+        Relationships: [];
+      };
+      stock_price_quote_cache: {
+        Row: StockPriceQuoteCacheRow;
+        Insert: StockPriceQuoteCacheInsert;
+        Update: Partial<StockPriceQuoteCacheInsert>;
+        Relationships: [];
+      };
       relationship_facts: {
         Row: RelationshipFactsRow;
         Insert: RelationshipFactsInsert;
@@ -941,6 +953,44 @@ interface MemberStockTradesInsert {
   asset_type?: string | null;
   parse_confidence?: string | null;
   raw_payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface StockPriceHistoryCacheRow {
+  symbol: string;
+  price_date: string;
+  close_price: number;
+  source: string;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StockPriceHistoryCacheInsert {
+  symbol: string;
+  price_date: string;
+  close_price: number;
+  source: string;
+  fetched_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface StockPriceQuoteCacheRow {
+  symbol: string;
+  current_price: number;
+  source: string;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StockPriceQuoteCacheInsert {
+  symbol: string;
+  current_price: number;
+  source: string;
+  fetched_at?: string;
   created_at?: string;
   updated_at?: string;
 }
