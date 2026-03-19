@@ -2,6 +2,12 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { summarizeMemberVotes, type MemberVoteRecord } from "../lib/member-votes";
 import { prepareBillCacheRowsForUpsert, resolveBillWarmRequest } from "../lib/bill-cache";
+import {
+  createGoogleAutocompleteLimiter,
+  getGoogleAutocompleteProbe,
+  parseGoogleAutocompleteResponse,
+  type GoogleAutocompleteProbeKey,
+} from "../lib/google-autocomplete";
 import { getSupabase } from "../lib/supabase";
 import { FetchTimeoutError, fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { hasSupabase, parseBoundedInt } from "../lib/validation";
@@ -35,6 +41,11 @@ const MEMBER_DETAIL_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 const VOTES_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
 const VOTE_DETAIL_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
 const BILLS_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
+const GOOGLE_AUTOCOMPLETE_MIN_INTERVAL_MS = 5_000;
+const GOOGLE_AUTOCOMPLETE_CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+const googleAutocompleteLimiter = createGoogleAutocompleteLimiter({
+  minIntervalMs: GOOGLE_AUTOCOMPLETE_MIN_INTERVAL_MS,
+});
 
 type CachedTimestampRow = { updated_at?: string | null };
 type BillCacheTable = "bill_details_cache" | "bill_actions_cache" | "bill_cosponsors_cache";
@@ -709,6 +720,112 @@ async function fetchMemberDetailFromCongress(
     ok: true as const,
     data,
   };
+}
+
+async function resolveMemberNameForAutocomplete(
+  env: Env["Bindings"],
+  apiKey: string | undefined,
+  bioguideId: string,
+) {
+  if (hasSupabase(env)) {
+    try {
+      const sb = getSupabase(env);
+      const { data, error } = await sb
+        .from("members")
+        .select("name,direct_order_name")
+        .eq("bioguide_id", bioguideId)
+        .maybeSingle<{ name: string | null; direct_order_name: string | null }>();
+      if (!error) {
+        const resolved = data?.direct_order_name?.trim() || data?.name?.trim();
+        if (resolved) return resolved;
+      }
+    } catch {
+      // Fall through to Congress API detail lookup.
+    }
+  }
+
+  if (!apiKey) return null;
+
+  try {
+    const live = await fetchMemberDetailFromCongress(env, apiKey, bioguideId);
+    if (!live.ok) return null;
+    const directOrderName = live.data?.member?.directOrderName;
+    if (typeof directOrderName === "string" && directOrderName.trim()) {
+      return directOrderName.trim();
+    }
+  } catch {
+    // Ignore lookup failure and let the route return a member-not-found error.
+  }
+
+  return null;
+}
+
+async function fetchGoogleAutocompleteSuggestions(query: string) {
+  await googleAutocompleteLimiter.waitTurn();
+
+  const url = new URL("https://suggestqueries.google.com/complete/search");
+  url.searchParams.set("client", "chrome");
+  url.searchParams.set("q", query);
+
+  const response = await fetchWithTimeout(url.toString(), 10_000, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; CongressVibeCheck/0.1; +https://github.com/RyWhal/Goon-bridge)",
+      "Accept": "application/json,text/plain,*/*",
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google suggest request failed (${response.status}): ${detail.slice(0, 200)}`);
+  }
+
+  return response.json() as Promise<[string, unknown[], ...unknown[]]>;
+}
+
+type GoogleAutocompleteCachePayload = {
+  key: GoogleAutocompleteProbeKey;
+  query: string;
+  suggestions: ReturnType<typeof parseGoogleAutocompleteResponse>;
+};
+
+async function readGoogleAutocompleteCache(
+  env: Env["Bindings"],
+  bioguideId: string,
+  probeKey: GoogleAutocompleteProbeKey,
+) {
+  if (!hasSupabase(env)) return null;
+
+  const sb = getSupabase(env);
+  const { data, error } = await sb
+    .from("google_autocomplete_cache")
+    .select("query,payload,updated_at")
+    .eq("bioguide_id", bioguideId)
+    .eq("probe_key", probeKey)
+    .maybeSingle<{ query: string; payload: GoogleAutocompleteCachePayload; updated_at: string | null }>();
+
+  if (error || !data?.payload) return null;
+  return data;
+}
+
+async function writeGoogleAutocompleteCache(
+  env: Env["Bindings"],
+  bioguideId: string,
+  probe: GoogleAutocompleteCachePayload,
+  fetchedAt: string,
+) {
+  if (!hasSupabase(env)) return;
+
+  const sb = getSupabase(env);
+  await sb.from("google_autocomplete_cache").upsert(
+    {
+      bioguide_id: bioguideId,
+      probe_key: probe.key,
+      query: probe.query,
+      payload: probe,
+      updated_at: fetchedAt,
+    },
+    { onConflict: "bioguide_id,probe_key" },
+  );
 }
 
 function queueMemberDetailRefresh(
@@ -2283,6 +2400,73 @@ congress.get("/members/browse", async (c) => {
       return c.json({ error: error.message }, 504);
     }
     return c.json({ error: "Failed to fetch from Congress API" }, 502);
+  }
+});
+
+// ── GET /api/congress/members/:bioguideId/google-autocomplete ───────────────
+congress.get("/members/:bioguideId/google-autocomplete", async (c) => {
+  const bioguideId = c.req.param("bioguideId");
+  const apiKey = c.env.CONGRESS_API_KEY;
+  const memberName = await resolveMemberNameForAutocomplete(c.env, apiKey, bioguideId);
+
+  if (!memberName) {
+    return c.json({ error: "Member not found" }, 404, { "Cache-Control": "no-store" });
+  }
+
+  try {
+    const requestedProbe = getGoogleAutocompleteProbe(memberName, c.req.query("probe"));
+
+    if (hasSupabase(c.env)) {
+      const cached = await readGoogleAutocompleteCache(c.env, bioguideId, requestedProbe.key);
+      if (
+        cached?.payload &&
+        cached.query === requestedProbe.query &&
+        !isTimestampStale(cached.updated_at, GOOGLE_AUTOCOMPLETE_CACHE_STALE_MS)
+      ) {
+        return c.json(
+          {
+            bioguideId,
+            memberName,
+            disclaimer: "Live Google autocomplete suggestions. This is not sentiment analysis.",
+            fetchedAt: cached.updated_at,
+            probe: cached.payload,
+          },
+          200,
+          { "Cache-Control": "public, max-age=300" },
+        );
+      }
+    }
+
+    const payload = await fetchGoogleAutocompleteSuggestions(requestedProbe.query);
+    const fetchedAt = new Date().toISOString();
+    const probe = {
+      key: requestedProbe.key,
+      query: requestedProbe.query,
+      suggestions: parseGoogleAutocompleteResponse(requestedProbe.query, payload),
+    } satisfies GoogleAutocompleteCachePayload;
+
+    await writeGoogleAutocompleteCache(c.env, bioguideId, probe, fetchedAt);
+
+    return c.json(
+      {
+        bioguideId,
+        memberName,
+        disclaimer: "Live Google autocomplete suggestions. This is not sentiment analysis.",
+        fetchedAt,
+        probe,
+      },
+      200,
+      { "Cache-Control": "public, max-age=300" },
+    );
+  } catch (error) {
+    if (error instanceof FetchTimeoutError) {
+      return c.json({ error: error.message }, 504, { "Cache-Control": "no-store" });
+    }
+    return c.json(
+      { error: error instanceof Error ? error.message : "Failed to fetch Google autocomplete results" },
+      502,
+      { "Cache-Control": "no-store" },
+    );
   }
 });
 

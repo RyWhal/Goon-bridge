@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { JsonViewer } from "./JsonViewer";
 import {
@@ -8,6 +8,15 @@ import {
   normalizeVotePosition,
   resolveMemberImageUrl,
 } from "../lib/congress";
+import {
+  buildGoogleSearchUrl,
+  canShowGoogleAutocompleteExperiment,
+  formatGoogleAutocompleteProbeHeading,
+  getGoogleAutocompleteOptionalProbeKeys,
+  type GoogleAutocompleteProbeKey,
+  shouldLoadGoogleAutocomplete,
+  summarizeAutocompleteCompletions,
+} from "../lib/member-experiments";
 
 interface MemberResult {
   name?: string;
@@ -93,6 +102,25 @@ interface MemberVotesResponse {
   bioguide_id: string;
   votes?: MemberVoteRecord[];
   count?: number;
+}
+
+interface GoogleAutocompleteSuggestion {
+  text: string;
+  completion: string;
+}
+
+interface GoogleAutocompleteProbe {
+  key: GoogleAutocompleteProbeKey;
+  query: string;
+  suggestions: GoogleAutocompleteSuggestion[];
+}
+
+interface GoogleAutocompleteResponse {
+  bioguideId: string;
+  memberName: string;
+  disclaimer: string;
+  fetchedAt: string;
+  probe: GoogleAutocompleteProbe;
 }
 
 type PartyFilter = "all" | "D" | "R" | "I";
@@ -431,7 +459,11 @@ function MemberCard({
         <div className="col-span-full">
           {detail?.loading && <LoadingSkeleton />}
           {detail?.data?.member && (
-            <MemberDetailCard member={detail.data.member} votingRecord={memberVotes} />
+            <MemberDetailCard
+              key={detail.data.member.bioguideId ?? member.bioguideId ?? "member-detail"}
+              member={detail.data.member}
+              votingRecord={memberVotes}
+            />
           )}
           {!detail?.loading && !detail?.data?.member && detail?.error && (
             <div className="card border-vibe-nay/30">
@@ -451,6 +483,13 @@ function MemberDetailCard({
   member: NonNullable<MemberDetailResponse["member"]>;
   votingRecord: ReturnType<typeof useApi<MemberVotesResponse>> | null;
 }) {
+  const [isGoogleAutocompleteOpen, setIsGoogleAutocompleteOpen] = useState(false);
+  const [googleAutocompleteByProbe, setGoogleAutocompleteByProbe] = useState<Partial<Record<GoogleAutocompleteProbeKey, GoogleAutocompleteProbe>>>({});
+  const [googleAutocompleteLoading, setGoogleAutocompleteLoading] = useState<Partial<Record<GoogleAutocompleteProbeKey, boolean>>>({});
+  const [googleAutocompleteError, setGoogleAutocompleteError] = useState<string | null>(null);
+  const [googleAutocompleteDisclaimer, setGoogleAutocompleteDisclaimer] = useState("Live Google autocomplete suggestions. This is not sentiment analysis.");
+  const [googleAutocompleteFetchedAt, setGoogleAutocompleteFetchedAt] = useState<string | null>(null);
+  const activeBioguideIdRef = useRef(member.bioguideId ?? null);
   const terms = member.terms ?? [];
   const latestTerm = terms[terms.length - 1];
   const chamber = latestTerm?.chamber ?? "";
@@ -470,6 +509,83 @@ function MemberDetailCard({
   const isCurrentSenator = chamber.toLowerCase().includes("senate");
   const isCurrentRep = chamber.toLowerCase().includes("house");
   const recentVotes = votingRecord?.data?.votes ?? [];
+  const googleAutocompleteEnabled = canShowGoogleAutocompleteExperiment(member.bioguideId);
+  const loadedProbeKeys = (["base", "is", "does"] as const).filter((probeKey) => googleAutocompleteByProbe[probeKey]);
+  const optionalProbeKeys = getGoogleAutocompleteOptionalProbeKeys([...loadedProbeKeys]);
+
+  useEffect(() => {
+    activeBioguideIdRef.current = member.bioguideId ?? null;
+    setIsGoogleAutocompleteOpen(false);
+    setGoogleAutocompleteByProbe({});
+    setGoogleAutocompleteLoading({});
+    setGoogleAutocompleteError(null);
+    setGoogleAutocompleteFetchedAt(null);
+    setGoogleAutocompleteDisclaimer("Live Google autocomplete suggestions. This is not sentiment analysis.");
+  }, [member.bioguideId]);
+
+  const fetchGoogleAutocompleteProbe = useCallback(async (probeKey: GoogleAutocompleteProbeKey) => {
+    const bioguideId = member.bioguideId;
+    if (!bioguideId) return;
+    if (googleAutocompleteLoading[probeKey] || googleAutocompleteByProbe[probeKey]) return;
+
+    setGoogleAutocompleteLoading((current) => ({ ...current, [probeKey]: true }));
+    setGoogleAutocompleteError(null);
+
+    try {
+      const response = await fetch(
+        `/api/congress/members/${bioguideId}/google-autocomplete?probe=${encodeURIComponent(probeKey)}`,
+      );
+      const text = await response.text().catch(() => "");
+
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}`;
+        try {
+          const payload = JSON.parse(text) as { error?: string; detail?: string; message?: string };
+          errorMessage = payload.error ?? payload.detail ?? payload.message ?? errorMessage;
+        } catch {
+          if (text.trim()) errorMessage = `${errorMessage}: ${text.trim().slice(0, 200)}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      const payload = JSON.parse(text) as GoogleAutocompleteResponse & { error?: string; detail?: string };
+      if (payload.error) {
+        throw new Error(payload.detail ? `${payload.error}: ${payload.detail}` : payload.error);
+      }
+      if (activeBioguideIdRef.current !== payload.bioguideId) return;
+
+      setGoogleAutocompleteByProbe((current) => ({
+        ...current,
+        [payload.probe.key]: payload.probe,
+      }));
+      setGoogleAutocompleteDisclaimer(payload.disclaimer);
+      setGoogleAutocompleteFetchedAt(payload.fetchedAt);
+    } catch (error) {
+      if (activeBioguideIdRef.current !== bioguideId) return;
+      setGoogleAutocompleteError(error instanceof Error ? error.message : "Network error");
+    } finally {
+      if (activeBioguideIdRef.current !== bioguideId) return;
+      setGoogleAutocompleteLoading((current) => ({ ...current, [probeKey]: false }));
+    }
+  }, [googleAutocompleteByProbe, googleAutocompleteLoading, member.bioguideId]);
+
+  useEffect(() => {
+    if (!shouldLoadGoogleAutocomplete({
+      bioguideId: member.bioguideId,
+      isExpanded: true,
+      isOpen: isGoogleAutocompleteOpen,
+    })) {
+      return;
+    }
+    if (googleAutocompleteByProbe.base || googleAutocompleteLoading.base) return;
+    void fetchGoogleAutocompleteProbe("base");
+  }, [
+    fetchGoogleAutocompleteProbe,
+    googleAutocompleteByProbe.base,
+    googleAutocompleteLoading.base,
+    isGoogleAutocompleteOpen,
+    member.bioguideId,
+  ]);
   const voteCounts = recentVotes.reduce(
     (counts, vote) => {
       const normalized = normalizeVotePosition(vote.position);
@@ -694,6 +810,106 @@ function MemberDetailCard({
       </SectionPanel>
 
       <JsonViewer data={{ member }} label="Full API Response" />
+
+      {googleAutocompleteEnabled && (
+        <SectionPanel>
+          <button
+            type="button"
+            onClick={() => setIsGoogleAutocompleteOpen((current) => !current)}
+            className="flex w-full items-center justify-between gap-3 text-left"
+          >
+            <p className="text-xs text-vibe-dim uppercase tracking-wider">
+              Google Autocomplete Results
+            </p>
+            <span className="text-xs text-vibe-dim">
+              {isGoogleAutocompleteOpen ? "▲" : "▼"}
+            </span>
+          </button>
+
+          {isGoogleAutocompleteOpen && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <p className="text-xs text-vibe-dim">
+                  {googleAutocompleteDisclaimer}
+                </p>
+                {googleAutocompleteFetchedAt && (
+                  <span className="text-xs text-vibe-dim">
+                    {new Date(googleAutocompleteFetchedAt).toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+
+              {googleAutocompleteLoading.base && !googleAutocompleteByProbe.base && <LoadingSkeleton />}
+
+              {googleAutocompleteError && (
+                <div className="rounded bg-vibe-surface px-3 py-2 text-xs text-vibe-nay">
+                  {googleAutocompleteError}
+                </div>
+              )}
+
+              {optionalProbeKeys.length > 0 && (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {optionalProbeKeys.map((probeKey) => {
+                    const probeQuery = probeKey === "is"
+                      ? `${member.directOrderName ?? member.bioguideId ?? "Member"} is`
+                      : `does ${member.directOrderName ?? member.bioguideId ?? "Member"}`;
+                    return (
+                      <button
+                        key={probeKey}
+                        type="button"
+                        onClick={() => void fetchGoogleAutocompleteProbe(probeKey)}
+                        disabled={Boolean(googleAutocompleteLoading[probeKey])}
+                        className="rounded-full border border-vibe-border px-3 py-1 text-[11px] text-vibe-dim transition-colors hover:border-vibe-accent hover:text-vibe-accent disabled:cursor-wait disabled:opacity-60"
+                      >
+                        {googleAutocompleteLoading[probeKey]
+                          ? `Loading ${formatGoogleAutocompleteProbeHeading(probeQuery)}`
+                          : `Load ${formatGoogleAutocompleteProbeHeading(probeQuery)}`}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {loadedProbeKeys.length > 0 && (
+                <div className="space-y-3">
+                  {(["base", "is", "does"] as const).flatMap((probeKey) => {
+                    const probe = googleAutocompleteByProbe[probeKey];
+                    if (!probe) return [];
+                    const completions = summarizeAutocompleteCompletions(probe.suggestions);
+                    return [(
+                      <div key={probe.query} className="rounded bg-vibe-surface px-3 py-3 text-xs">
+                        <p className="mb-2 text-sm font-semibold text-vibe-text">
+                          {formatGoogleAutocompleteProbeHeading(probe.query)}
+                        </p>
+                        {completions.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {probe.suggestions.map((suggestion, index) => {
+                              const label = completions[index] ?? suggestion.text;
+                              return (
+                                <a
+                                  key={`${probe.query}-${suggestion.text}`}
+                                  href={buildGoogleSearchUrl(suggestion.text)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="rounded-full border border-vibe-border px-2 py-1 text-[11px] text-vibe-text transition-colors hover:border-vibe-accent hover:text-vibe-accent"
+                                >
+                                  {label}
+                                </a>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="text-vibe-dim italic">No suggestions returned for this probe.</p>
+                        )}
+                      </div>
+                    )];
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </SectionPanel>
+      )}
     </div>
   );
 }
