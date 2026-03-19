@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi";
-import { resolveMemberImageUrl } from "../lib/congress";
 
 interface MemberRecord {
   bioguide_id?: string;
@@ -31,6 +30,12 @@ interface TradeRecord {
   owner_type: string | null;
   asset_type: string | null;
   parse_confidence: string | null;
+  trade_date_close_price: number | null;
+  trade_date_price_source: string | null;
+  current_price: number | null;
+  current_price_as_of: string | null;
+  price_change_since_trade: number | null;
+  price_change_percent_since_trade: number | null;
   organization: {
     id: number | null;
     name: string | null;
@@ -41,37 +46,33 @@ interface TradeRecord {
     document_url: string | null;
     filed_date: string | null;
   } | null;
-}
-
-interface RecentTradeRecord extends TradeRecord {
   member: MemberRecord | null;
 }
 
-interface RecentTradesResponse {
+interface TradesResponse {
   count: number;
-  trades: RecentTradeRecord[];
-}
-
-interface TradeMemberSummary {
-  bioguide_id: string;
-  trade_count: number;
-  latest_trade_date: string | null;
-  member: MemberRecord | null;
-}
-
-interface TradeMembersResponse {
-  count: number;
-  members: TradeMemberSummary[];
-}
-
-interface MemberTradesResponse {
-  bioguide_id: string;
-  member: MemberRecord;
-  count: number;
+  limit?: number;
+  offset?: number;
   trades: TradeRecord[];
 }
 
 type TransactionFilter = "all" | "purchase" | "sale" | "exchange";
+
+type FilterState = {
+  from: string;
+  to: string;
+  member: string;
+  symbol: string;
+  transactionType: TransactionFilter;
+};
+
+const EMPTY_FILTERS: FilterState = {
+  from: "",
+  to: "",
+  member: "",
+  symbol: "",
+  transactionType: "all",
+};
 
 function normalizeParty(party?: string | null) {
   const value = (party ?? "").trim().toUpperCase();
@@ -89,7 +90,7 @@ function normalizeChamber(chamber?: string | null) {
 }
 
 function formatDate(value?: string | null) {
-  if (!value) return "Unknown date";
+  if (!value) return "Unknown";
   const parsed = new Date(`${value}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString(undefined, {
@@ -99,13 +100,45 @@ function formatDate(value?: string | null) {
   });
 }
 
+function formatCompactTradeDate(value?: string | null) {
+  if (!value) return { primary: "Unknown", secondary: "" };
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return { primary: value, secondary: "" };
+  }
+
+  return {
+    primary: parsed.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    }),
+    secondary: parsed.toLocaleDateString(undefined, {
+      year: "numeric",
+    }),
+  };
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "Unknown";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function formatTradeType(value?: string | null) {
-  if (!value) return "trade";
-  return value.replace(/_/g, " ");
+  if (!value) return "Trade";
+  const normalized = value.replace(/_/g, " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
 function formatCurrency(value?: number | null) {
-  if (value == null || !Number.isFinite(value)) return null;
+  if (value == null || !Number.isFinite(value)) return "N/A";
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency: "USD",
@@ -113,11 +146,27 @@ function formatCurrency(value?: number | null) {
   }).format(value);
 }
 
-function formatShareCount(value?: number | null) {
-  if (value == null || !Number.isFinite(value)) return null;
-  return new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 2,
-  }).format(value);
+function formatPercent(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+function buildTradesUrl(filters: FilterState) {
+  const hasFilters = Boolean(
+    filters.from || filters.to || filters.member.trim() || filters.symbol.trim() || filters.transactionType !== "all",
+  );
+
+  if (!hasFilters) {
+    return "/api/disclosures/trades/recent?limit=20";
+  }
+
+  const params = new URLSearchParams({ limit: "20", offset: "0" });
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.member.trim()) params.set("member", filters.member.trim());
+  if (filters.symbol.trim()) params.set("symbol", filters.symbol.trim().toUpperCase());
+  if (filters.transactionType !== "all") params.set("transaction_type", filters.transactionType);
+  return `/api/disclosures/trades/search?${params.toString()}`;
 }
 
 function PartyBadge({ party }: { party?: string | null }) {
@@ -128,139 +177,94 @@ function PartyBadge({ party }: { party?: string | null }) {
   return <span className="badge bg-vibe-border text-vibe-dim">?</span>;
 }
 
-function TradeCard({
-  trade,
-  member,
-  onOpenMember,
+function TradeTypeBadge({ value }: { value?: string | null }) {
+  const type = value?.toLowerCase() ?? "";
+  if (type === "purchase") return <span className="badge bg-vibe-yea/20 text-vibe-yea">Purchase</span>;
+  if (type === "sale") return <span className="badge bg-vibe-nay/20 text-vibe-nay">Sale</span>;
+  if (type === "exchange") return <span className="badge bg-vibe-cosmic/20 text-vibe-cosmic">Exchange</span>;
+  return <span className="badge bg-vibe-border text-vibe-dim">{formatTradeType(value)}</span>;
+}
+
+function StatCard({
+  label,
+  value,
+  tone,
 }: {
-  trade: TradeRecord;
-  member?: MemberRecord | null;
-  onOpenMember?: ((bioguideId: string) => void) | null;
+  label: string;
+  value: string;
+  tone?: "default" | "positive" | "negative";
 }) {
+  const toneClass = tone === "positive"
+    ? "text-vibe-yea"
+    : tone === "negative"
+      ? "text-vibe-nay"
+      : "text-vibe-text";
+
   return (
-    <article className="card border-vibe-accent/20">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] text-vibe-dim">
-            <span className="badge bg-vibe-money/20 text-vibe-money">
-              {formatTradeType(trade.transaction_type)}
-            </span>
-            {trade.symbol && (
-              <span className="badge bg-vibe-cosmic/20 text-vibe-cosmic">{trade.symbol}</span>
-            )}
-            <span>{formatDate(trade.transaction_date)}</span>
-          </div>
-          <h3 className="text-lg font-bold text-vibe-text">
-            {trade.asset_name ?? trade.organization?.name ?? "Unknown asset"}
-          </h3>
-          <div className="flex flex-wrap items-center gap-2 text-sm text-vibe-dim">
-            {member && onOpenMember && (
-              <button
-                type="button"
-                onClick={() => onOpenMember(trade.bioguide_id)}
-                className="text-vibe-accent hover:text-vibe-accent/80"
-              >
-                {member.direct_order_name ?? member.name ?? trade.bioguide_id}
-              </button>
-            )}
-            {trade.amount_range && <span>{trade.amount_range}</span>}
-            {trade.owner_type && <span>{trade.owner_type.replace(/_/g, " ")}</span>}
-            {trade.parse_confidence && <span>{trade.parse_confidence} confidence</span>}
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm text-vibe-dim">
-            {formatShareCount(trade.share_count) && (
-              <span>~{formatShareCount(trade.share_count)} shares</span>
-            )}
-            {formatCurrency(trade.execution_close_price) && (
-              <span>@ {formatCurrency(trade.execution_close_price)} close</span>
-            )}
-            {formatCurrency(trade.estimated_trade_value) && (
-              <span>~{formatCurrency(trade.estimated_trade_value)} estimated value</span>
-            )}
-          </div>
-        </div>
-
-        {trade.filing?.document_url && (
-          <a
-            href={trade.filing.document_url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-sm text-vibe-accent hover:text-vibe-accent/80"
-          >
-            Source
-          </a>
-        )}
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-vibe-dim">
-        {trade.organization?.name && (
-          <span className="badge bg-vibe-border text-vibe-text">{trade.organization.name}</span>
-        )}
-        {trade.disclosure_date && <span>disclosed {formatDate(trade.disclosure_date)}</span>}
-        <span>{trade.source_row_key}</span>
-      </div>
-    </article>
+    <div className="rounded-xl border border-vibe-border bg-vibe-surface/70 p-3">
+      <div className="text-[11px] uppercase tracking-[0.2em] text-vibe-dim">{label}</div>
+      <div className={`mt-2 text-xl font-bold ${toneClass}`}>{value}</div>
+    </div>
   );
 }
 
 export function StockTradeExplorer() {
-  const [query, setQuery] = useState("");
-  const [selectedBioguideId, setSelectedBioguideId] = useState<string | null>(null);
-  const [transactionFilter, setTransactionFilter] = useState<TransactionFilter>("all");
+  const [draftFilters, setDraftFilters] = useState<FilterState>(EMPTY_FILTERS);
+  const [appliedFilters, setAppliedFilters] = useState<FilterState>(EMPTY_FILTERS);
+  const [selectedTradeId, setSelectedTradeId] = useState<number | null>(null);
 
-  const recentTrades = useApi<RecentTradesResponse>();
-  const memberTrades = useApi<MemberTradesResponse>();
-  const tradeMembers = useApi<TradeMembersResponse>();
+  const trades = useApi<TradesResponse>();
 
   useEffect(() => {
-    const params = new URLSearchParams({ limit: "24" });
-    if (transactionFilter !== "all") {
-      params.set("transaction_type", transactionFilter);
-    }
-    void recentTrades.fetchData(`/api/disclosures/trades/recent?${params.toString()}`);
-    void tradeMembers.fetchData(`/api/disclosures/members/with-trades?limit=500${transactionFilter !== "all" ? `&transaction_type=${encodeURIComponent(transactionFilter)}` : ""}`);
-  }, [recentTrades.fetchData, tradeMembers.fetchData, transactionFilter]);
+    void trades.fetchData(buildTradesUrl(appliedFilters), { force: true, ttlMs: 60_000 });
+  }, [appliedFilters, trades.fetchData]);
 
   useEffect(() => {
-    if (!selectedBioguideId) return;
-    const params = new URLSearchParams({ limit: "50" });
-    if (transactionFilter !== "all") {
-      params.set("transaction_type", transactionFilter);
+    const rows = trades.data?.trades ?? [];
+    if (!rows.length) {
+      setSelectedTradeId(null);
+      return;
     }
-    void memberTrades.fetchData(`/api/disclosures/member/${selectedBioguideId}/trades?${params.toString()}`);
-  }, [memberTrades.fetchData, selectedBioguideId, transactionFilter]);
 
-  const foundMembers = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return (tradeMembers.data?.members ?? [])
-      .map((entry) => ({
-        bioguideId: entry.bioguide_id,
-        name: entry.member?.direct_order_name ?? entry.member?.name ?? entry.bioguide_id,
-        state: entry.member?.state ?? undefined,
-        party: entry.member?.party ?? undefined,
-        chamber: entry.member?.chamber ?? undefined,
-        depiction: entry.member?.image_url ? { imageUrl: entry.member.image_url } : undefined,
-        tradeCount: entry.trade_count,
-        latestTradeDate: entry.latest_trade_date,
-      }))
-      .filter((entry) => {
-        if (!normalizedQuery) return true;
-        const haystacks = [entry.name, entry.state, entry.bioguideId]
-          .filter((value): value is string => !!value)
-          .map((value) => value.toLowerCase());
-        return haystacks.some((value) => value.includes(normalizedQuery));
-      })
-      .sort((left, right) =>
-        (right.latestTradeDate ?? "").localeCompare(left.latestTradeDate ?? "") || right.tradeCount - left.tradeCount
-      );
-  }, [tradeMembers.data?.members, query]);
+    if (selectedTradeId == null || !rows.some((trade) => trade.id === selectedTradeId)) {
+      setSelectedTradeId(rows[0]?.id ?? null);
+    }
+  }, [selectedTradeId, trades.data?.trades]);
 
-  const selectedMember = memberTrades.data?.member ?? null;
-  const selectedMemberImageUrl = resolveMemberImageUrl(selectedMember?.image_url);
+  const selectedTrade = useMemo(
+    () => (trades.data?.trades ?? []).find((trade) => trade.id === selectedTradeId) ?? null,
+    [selectedTradeId, trades.data?.trades],
+  );
+  const hasActiveFilters = Boolean(
+    appliedFilters.from
+      || appliedFilters.to
+      || appliedFilters.member.trim()
+      || appliedFilters.symbol.trim()
+      || appliedFilters.transactionType !== "all",
+  );
 
-  const openMember = async (bioguideId: string) => {
-    setSelectedBioguideId(bioguideId);
+  const handleDraftChange = <K extends keyof FilterState>(key: K, value: FilterState[K]) => {
+    setDraftFilters((current) => ({ ...current, [key]: value }));
   };
+
+  const applyFilters = () => {
+    setAppliedFilters({
+      from: draftFilters.from,
+      to: draftFilters.to,
+      member: draftFilters.member,
+      symbol: draftFilters.symbol.trim().toUpperCase(),
+      transactionType: draftFilters.transactionType,
+    });
+  };
+
+  const resetFilters = () => {
+    setDraftFilters(EMPTY_FILTERS);
+    setAppliedFilters(EMPTY_FILTERS);
+  };
+
+  const countLabel = trades.data?.count ?? 0;
+  const selectedMemberName = selectedTrade?.member?.direct_order_name ?? selectedTrade?.member?.name ?? selectedTrade?.bioguide_id;
+  const selectedChamber = normalizeChamber(selectedTrade?.member?.chamber);
 
   return (
     <div className="space-y-4">
@@ -270,8 +274,8 @@ export function StockTradeExplorer() {
             <h2 className="text-sm font-semibold text-vibe-dim uppercase tracking-wider">
               Member Stock Trades
             </h2>
-            <p className="text-sm text-vibe-dim mt-2 max-w-2xl">
-              View normalized congressional stock trades parsed from official public disclosures and cached in Supabase. Start with recent parsed trades or drill into one member.
+            <p className="mt-2 max-w-3xl text-sm text-vibe-dim">
+              Browse the latest normalized congressional stock trades with server-side filtering and cached stock pricing from Finnhub.
             </p>
           </div>
           <span className="badge bg-vibe-money/20 text-vibe-money uppercase tracking-wider">
@@ -279,171 +283,261 @@ export function StockTradeExplorer() {
           </span>
         </div>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_180px]">
-          <input
-            type="text"
-            className="input w-full"
-            placeholder="Search members by name, state, or bioguide ID..."
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          <select
-            className="select"
-            value={transactionFilter}
-            onChange={(event) => setTransactionFilter(event.target.value as TransactionFilter)}
-          >
-            <option value="all">All trades</option>
-            <option value="purchase">Purchases</option>
-            <option value="sale">Sales</option>
-            <option value="exchange">Exchanges</option>
-          </select>
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-[180px_180px_minmax(0,1.1fr)_180px_180px_auto]">
+          <label className="space-y-1">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">From</span>
+            <input
+              type="date"
+              className="input w-full"
+              value={draftFilters.from}
+              onChange={(event) => handleDraftChange("from", event.target.value)}
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">To</span>
+            <input
+              type="date"
+              className="input w-full"
+              value={draftFilters.to}
+              onChange={(event) => handleDraftChange("to", event.target.value)}
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">Member</span>
+            <input
+              type="text"
+              className="input w-full"
+              placeholder="Search member name..."
+              value={draftFilters.member}
+              onChange={(event) => handleDraftChange("member", event.target.value)}
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">Trade Type</span>
+            <select
+              className="select h-10 w-full appearance-none"
+              value={draftFilters.transactionType}
+              onChange={(event) => handleDraftChange("transactionType", event.target.value as TransactionFilter)}
+            >
+              <option value="all">All trades</option>
+              <option value="purchase">Purchases</option>
+              <option value="sale">Sales</option>
+              <option value="exchange">Exchanges</option>
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">Ticker</span>
+            <input
+              type="text"
+              className="input w-full uppercase"
+              placeholder="NVDA"
+              value={draftFilters.symbol}
+              onChange={(event) => handleDraftChange("symbol", event.target.value.toUpperCase())}
+            />
+          </label>
+          <div className="flex items-end gap-2">
+            <button type="button" onClick={applyFilters} className="btn btn-primary">
+              Apply
+            </button>
+            <button type="button" onClick={resetFilters} className="btn btn-ghost">
+              Reset
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="space-y-4">
-          <div className="card">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-xs uppercase tracking-[0.2em] text-vibe-dim">Members With Trades</h3>
-              <span className="text-[11px] text-vibe-dim">{tradeMembers.data?.count ?? foundMembers.length} found</span>
-            </div>
-            <div className="mt-3 space-y-2 max-h-[38rem] overflow-y-auto pr-1">
-              {foundMembers.map((entry) => {
-                const isActive = selectedBioguideId === entry.bioguideId;
-                const chamber = normalizeChamber(entry.chamber);
-                const portraitUrl = resolveMemberImageUrl(entry.depiction?.imageUrl);
-                return (
-                  <button
-                    key={entry.bioguideId}
-                    type="button"
-                    onClick={() => entry.bioguideId && openMember(entry.bioguideId)}
-                    className={`card w-full text-left transition-colors ${
-                      isActive ? "border-vibe-accent/60" : "hover:border-vibe-accent/40"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      {portraitUrl && (
-                        <img
-                          src={portraitUrl}
-                          alt={entry.name ?? "Member portrait"}
-                          className="h-12 w-12 rounded-md object-cover border border-vibe-border"
-                        />
-                      )}
-                      <div className="min-w-0">
-                        <div className="text-base font-semibold text-vibe-text truncate">{entry.name}</div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-vibe-dim">
-                          <PartyBadge party={entry.party ?? null} />
-                          {entry.state && <span>{entry.state}</span>}
-                          {chamber && <span className="badge bg-vibe-border text-vibe-dim">{chamber}</span>}
-                          {entry.bioguideId && <span>{entry.bioguideId}</span>}
-                          <span>{entry.tradeCount} trade{entry.tradeCount === 1 ? "" : "s"}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-
-              {!foundMembers.length && (
-                <div className="card border-vibe-nay/30 text-sm text-vibe-dim">
-                  No members with parsed trades matched that search.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="space-y-4">
-          {!selectedBioguideId && (
-            <div className="card">
-              <h3 className="text-xs uppercase tracking-[0.2em] text-vibe-dim">Recent Parsed Trades</h3>
-              <p className="mt-2 text-sm text-vibe-dim">
-                These are normalized trades already extracted from official disclosure PDFs.
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="card overflow-hidden">
+          <div className="flex items-center justify-between gap-3 border-b border-vibe-border pb-3">
+            <div>
+              <h3 className="text-xs uppercase tracking-[0.2em] text-vibe-dim">Trade Feed</h3>
+              <p className="mt-1 text-sm text-vibe-dim">
+                {hasActiveFilters ? "Filtered trade results from the disclosure cache." : "Latest 20 trades by default."}
               </p>
+            </div>
+            <span className="text-sm text-vibe-dim">{countLabel} match{countLabel === 1 ? "" : "es"}</span>
+          </div>
 
-              {recentTrades.loading && <div className="mt-4 text-sm text-vibe-dim">Loading recent trades…</div>}
-              {recentTrades.error && (
-                <div className="card border-vibe-nay/30 mt-4 text-sm text-vibe-nay">{recentTrades.error}</div>
-              )}
-
-              {!recentTrades.loading && !recentTrades.error && (
-                <div className="mt-4 space-y-3">
-                  {recentTrades.data?.trades.length ? (
-                    recentTrades.data.trades.map((trade) => (
-                      <TradeCard
-                        key={trade.id}
-                        trade={trade}
-                        member={trade.member}
-                        onOpenMember={openMember}
-                      />
-                    ))
-                  ) : (
-                    <div className="card border-vibe-border text-sm text-vibe-dim">
-                      No parsed trades are available for this filter yet.
-                    </div>
-                  )}
-                </div>
-              )}
+          {trades.loading && <div className="py-6 text-sm text-vibe-dim">Loading trades…</div>}
+          {trades.error && !trades.loading && (
+            <div className="mt-4 rounded-xl border border-vibe-nay/30 bg-vibe-nay/10 p-3 text-sm text-vibe-nay">
+              {trades.error}
             </div>
           )}
 
-          {selectedBioguideId && (
-            <>
-              <div className="card">
-                <div className="flex items-start gap-4">
-                  {selectedMemberImageUrl && (
-                    <img
-                      src={selectedMemberImageUrl}
-                      alt={selectedMember?.direct_order_name ?? selectedMember?.name ?? selectedBioguideId}
-                      className="h-20 w-20 rounded-lg object-cover border border-vibe-border"
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <h3 className="text-2xl font-bold text-vibe-text">
-                      {selectedMember?.direct_order_name ?? selectedMember?.name ?? selectedBioguideId}
-                    </h3>
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-vibe-dim">
-                      <PartyBadge party={selectedMember?.party} />
-                      {selectedMember?.chamber && (
-                        <span className="badge bg-vibe-border text-vibe-dim">
-                          {normalizeChamber(selectedMember.chamber) ?? selectedMember.chamber}
-                        </span>
-                      )}
-                      {selectedMember?.state && <span>{selectedMember.state}</span>}
-                      <span>{selectedBioguideId}</span>
-                    </div>
+          {!trades.loading && !trades.error && !(trades.data?.trades.length) && (
+            <div className="py-6 text-sm text-vibe-dim">
+              No trades matched the current filters.
+            </div>
+          )}
+
+          {!trades.loading && !trades.error && (trades.data?.trades.length ?? 0) > 0 && (
+            <div className="mt-4">
+              <table className="w-full table-fixed border-separate border-spacing-0 text-left">
+                <thead>
+                  <tr className="text-[11px] uppercase tracking-[0.18em] text-vibe-dim">
+                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Trade Date</th>
+                    <th className="w-[26%] border-b border-vibe-border px-2.5 py-2 font-medium">Member</th>
+                    <th className="w-[13%] border-b border-vibe-border px-2.5 py-2 font-medium">Type</th>
+                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Ticker</th>
+                    <th className="w-[20%] border-b border-vibe-border px-2.5 py-2 font-medium">Amount</th>
+                    <th className="w-[10%] border-b border-vibe-border px-2.5 py-2 font-medium">Trade-Day</th>
+                    <th className="w-[11%] border-b border-vibe-border px-2.5 py-2 font-medium">Current</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.data?.trades.map((trade) => {
+                    const isSelected = trade.id === selectedTradeId;
+                    const compactTradeDate = formatCompactTradeDate(trade.transaction_date);
+                    return (
+                      <tr
+                        key={trade.id}
+                        onClick={() => setSelectedTradeId(trade.id)}
+                        className={`cursor-pointer transition-colors ${
+                          isSelected ? "bg-vibe-accent/10" : "hover:bg-vibe-surface/60"
+                        }`}
+                      >
+                        <td className="border-b border-vibe-border px-2.5 py-3 text-sm text-vibe-text">
+                          <div className="whitespace-nowrap font-medium">{compactTradeDate.primary}</div>
+                          <div className="whitespace-nowrap text-xs text-vibe-dim">{compactTradeDate.secondary}</div>
+                        </td>
+                        <td className="border-b border-vibe-border px-2.5 py-3 text-sm text-vibe-text">
+                          <div className="truncate font-medium">
+                            {trade.member?.direct_order_name ?? trade.member?.name ?? trade.bioguide_id}
+                          </div>
+                          <div className="mt-1 truncate text-xs text-vibe-dim">
+                            {[trade.member?.state, normalizeChamber(trade.member?.chamber)].filter(Boolean).join(" • ")}
+                          </div>
+                        </td>
+                        <td className="border-b border-vibe-border px-2.5 py-3 text-sm">
+                          <TradeTypeBadge value={trade.transaction_type} />
+                        </td>
+                        <td className="whitespace-nowrap border-b border-vibe-border px-2.5 py-3 text-sm font-semibold text-vibe-text">
+                          {trade.symbol ?? trade.organization?.ticker ?? "N/A"}
+                        </td>
+                        <td className="border-b border-vibe-border px-2.5 py-3 text-sm text-vibe-text">
+                          <div className="truncate">{trade.amount_range ?? "N/A"}</div>
+                        </td>
+                        <td className="whitespace-nowrap border-b border-vibe-border px-2.5 py-3 text-sm text-vibe-text">
+                          {formatCurrency(trade.trade_date_close_price)}
+                        </td>
+                        <td className="whitespace-nowrap border-b border-vibe-border px-2.5 py-3 text-sm text-vibe-text">
+                          {formatCurrency(trade.current_price)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          {!selectedTrade && (
+            <div className="py-10 text-sm text-vibe-dim">
+              Select a trade to inspect its filing details and pricing snapshot.
+            </div>
+          )}
+
+          {selectedTrade && (
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-vibe-dim">Selected Trade</div>
+                  <h3 className="mt-2 text-xl font-bold text-vibe-text">{selectedMemberName}</h3>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-vibe-dim">
+                    <PartyBadge party={selectedTrade.member?.party} />
+                    {selectedTrade.member?.state && <span>{selectedTrade.member.state}</span>}
+                    {selectedChamber && <span className="badge bg-vibe-border text-vibe-dim">{selectedChamber}</span>}
+                    <span>{selectedTrade.bioguide_id}</span>
                   </div>
+                </div>
+                <TradeTypeBadge value={selectedTrade.transaction_type} />
+              </div>
+
+              <div className="rounded-xl border border-vibe-border bg-vibe-surface/60 p-3">
+                <div className="text-base font-semibold text-vibe-text">
+                  {selectedTrade.asset_name ?? selectedTrade.organization?.name ?? "Unknown asset"}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-vibe-dim">
+                  {(selectedTrade.symbol ?? selectedTrade.organization?.ticker) && (
+                    <span className="badge bg-vibe-cosmic/20 text-vibe-cosmic">
+                      {selectedTrade.symbol ?? selectedTrade.organization?.ticker}
+                    </span>
+                  )}
+                  <span>{formatDate(selectedTrade.transaction_date)}</span>
+                  {selectedTrade.amount_range && <span>{selectedTrade.amount_range}</span>}
                 </div>
               </div>
 
-              {memberTrades.loading && <div className="card text-sm text-vibe-dim">Loading member trades…</div>}
-              {memberTrades.error && (
-                <div className="card border-vibe-nay/30 text-sm text-vibe-nay">{memberTrades.error}</div>
-              )}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <StatCard label="Trade-Day Close" value={formatCurrency(selectedTrade.trade_date_close_price)} />
+                <StatCard label="Current Price" value={formatCurrency(selectedTrade.current_price)} />
+                <StatCard
+                  label="Price Change"
+                  value={formatCurrency(selectedTrade.price_change_since_trade)}
+                  tone={selectedTrade.price_change_since_trade == null ? "default" : selectedTrade.price_change_since_trade >= 0 ? "positive" : "negative"}
+                />
+                <StatCard
+                  label="Change Percent"
+                  value={formatPercent(selectedTrade.price_change_percent_since_trade)}
+                  tone={selectedTrade.price_change_percent_since_trade == null ? "default" : selectedTrade.price_change_percent_since_trade >= 0 ? "positive" : "negative"}
+                />
+              </div>
 
-              {!memberTrades.loading && !memberTrades.error && (
-                <div className="card">
+              <div className="rounded-xl border border-vibe-border bg-vibe-surface/60 p-4">
+                <div className="text-[11px] uppercase tracking-[0.2em] text-vibe-dim">Trade Details</div>
+                <dl className="mt-3 space-y-3 text-sm">
                   <div className="flex items-center justify-between gap-3">
-                    <h3 className="text-xs uppercase tracking-[0.2em] text-vibe-dim">Trade History</h3>
-                    <span className="text-sm text-vibe-dim">
-                      {memberTrades.data?.count ?? 0} trade{(memberTrades.data?.count ?? 0) === 1 ? "" : "s"}
-                    </span>
+                    <dt className="text-vibe-dim">Owner</dt>
+                    <dd className="text-vibe-text">{selectedTrade.owner_label ?? selectedTrade.owner_type ?? "N/A"}</dd>
                   </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Estimated Value</dt>
+                    <dd className="text-vibe-text">{formatCurrency(selectedTrade.estimated_trade_value)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Trade Price Source</dt>
+                    <dd className="text-vibe-text">{selectedTrade.trade_date_price_source ?? "N/A"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Current Price As Of</dt>
+                    <dd className="text-vibe-text">{formatDateTime(selectedTrade.current_price_as_of)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Disclosure Filed</dt>
+                    <dd className="text-vibe-text">{formatDate(selectedTrade.disclosure_date)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-vibe-dim">Parse Confidence</dt>
+                    <dd className="text-vibe-text">{selectedTrade.parse_confidence ?? "N/A"}</dd>
+                  </div>
+                  <div className="flex items-start justify-between gap-3">
+                    <dt className="text-vibe-dim">Source Row</dt>
+                    <dd className="max-w-[14rem] break-all text-right text-vibe-text">{selectedTrade.source_row_key}</dd>
+                  </div>
+                </dl>
+              </div>
 
-                  <div className="mt-4 space-y-3">
-                    {memberTrades.data?.trades.length ? (
-                      memberTrades.data.trades.map((trade) => (
-                        <TradeCard key={trade.id} trade={trade} />
-                      ))
-                    ) : (
-                      <div className="card border-vibe-border text-sm text-vibe-dim">
-                        No normalized trades found for this member yet.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
+              <div className="flex flex-wrap gap-2">
+                {selectedTrade.filing?.document_url && (
+                  <a
+                    href={selectedTrade.filing.document_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn btn-primary"
+                  >
+                    Open Source Filing
+                  </a>
+                )}
+                {(selectedTrade.symbol ?? selectedTrade.organization?.ticker) && (
+                  <span className="badge bg-vibe-cosmic/20 text-vibe-cosmic">
+                    {selectedTrade.symbol ?? selectedTrade.organization?.ticker}
+                  </span>
+                )}
+              </div>
+            </div>
           )}
         </div>
       </div>

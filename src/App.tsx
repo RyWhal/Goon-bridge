@@ -7,56 +7,19 @@ import { CorporationSearch } from "./components/CorporationSearch";
 import { CorrelationExplorer } from "./components/CorrelationExplorer";
 import { StockTradeExplorer } from "./components/StockTradeExplorer";
 import { AdminPanel } from "./components/AdminPanel";
+import {
+  EXPERIMENTAL_TABS,
+  MAIN_TABS,
+  type ExperimentalTabId,
+  getPathForRoute,
+  getRouteState,
+  type MainTabId,
+  type RouteState,
+} from "./lib/routes";
 
-const MAIN_TABS = [
-  { id: "members", label: "Members" },
-  { id: "bills", label: "Bills & Votes" },
-  { id: "money", label: "Campaign Money" },
-  { id: "corporations", label: "Corporations" },
-] as const;
-
-const EXPERIMENTAL_TABS = [
-  { id: "correlations", label: "Correlations" },
-  { id: "trades", label: "Stock Trades" },
-] as const;
-
-type MainTabId = (typeof MAIN_TABS)[number]["id"];
-type ExperimentalTabId = (typeof EXPERIMENTAL_TABS)[number]["id"];
 type Theme = "dark" | "light";
-type RouteState =
-  | { page: "main"; tab: MainTabId }
-  | { page: "experimental"; tab: ExperimentalTabId }
-  | { page: "admin" };
 
 const THEME_STORAGE_KEY = "goon-bridge-theme";
-
-function getRouteState(pathname: string): RouteState {
-  if (pathname === "/admin") {
-    return { page: "admin" };
-  }
-
-  if (pathname === "/experimental/trades") {
-    return { page: "experimental", tab: "trades" };
-  }
-
-  if (pathname === "/experimental" || pathname === "/experimental/correlations") {
-    return { page: "experimental", tab: "correlations" };
-  }
-
-  return { page: "main", tab: "members" };
-}
-
-function getPathForRoute(route: RouteState): string {
-  if (route.page === "admin") {
-    return "/admin";
-  }
-
-  if (route.page === "experimental") {
-    return route.tab === "trades" ? "/experimental/trades" : "/experimental/correlations";
-  }
-
-  return "/";
-}
 
 export default function App() {
   const [route, setRoute] = useState<RouteState>(() => {
@@ -207,8 +170,8 @@ export default function App() {
         {route.page === "main" && route.tab === "bills" && <BillSearch />}
         {route.page === "main" && route.tab === "money" && <FecSearch />}
         {route.page === "main" && route.tab === "corporations" && <CorporationSearch />}
+        {route.page === "main" && route.tab === "trades" && <StockTradeExplorer />}
         {route.page === "experimental" && route.tab === "correlations" && <CorrelationExplorer />}
-        {route.page === "experimental" && route.tab === "trades" && <StockTradeExplorer />}
         {isAdmin && <AdminPanel />}
       </main>
 
