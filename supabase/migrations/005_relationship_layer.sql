@@ -228,7 +228,8 @@ CREATE UNIQUE INDEX idx_correlation_cases_unique
     summary
   );
 
-CREATE OR REPLACE VIEW member_correlation_cases AS
+CREATE OR REPLACE VIEW member_correlation_cases
+WITH (security_invoker = true) AS
 SELECT
   cc.id,
   cc.member_bioguide_id,
