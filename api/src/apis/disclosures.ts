@@ -12,6 +12,7 @@ import {
   buildTradeSearchParams,
   createTradePriceRequestCache,
   enrichTradeWithPrices,
+  preloadTradePriceCache,
 } from "../lib/stock-trades.ts";
 import { hasSupabase, isValidDate, parseLimit } from "../lib/validation";
 
@@ -277,6 +278,7 @@ disclosures.get("/trades/recent", async (c) => {
   if (memberError) return c.json({ error: memberError.message }, 500);
   const memberMap = new Map((members ?? []).map((entry) => [entry.bioguide_id, entry]));
   const requestCache = createTradePriceRequestCache();
+  await preloadTradePriceCache(sb, requestCache, trades ?? []);
 
   return c.json(
     {
@@ -372,6 +374,7 @@ disclosures.get("/trades/search", async (c) => {
 
   const memberMap = new Map((members ?? []).map((entry) => [entry.bioguide_id, entry]));
   const requestCache = createTradePriceRequestCache();
+  await preloadTradePriceCache(sb, requestCache, trades ?? []);
 
   return c.json(
     {
@@ -436,6 +439,7 @@ disclosures.get("/member/:bioguideId/trades", async (c) => {
     fetchFilingsByIds(sb, filingIds),
   ]);
   const requestCache = createTradePriceRequestCache();
+  await preloadTradePriceCache(sb, requestCache, trades ?? []);
 
   return c.json(
     {

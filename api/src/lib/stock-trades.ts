@@ -9,6 +9,8 @@ type SupabaseClient = ReturnType<typeof getSupabase>;
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const FINNHUB_TIMEOUT_MS = 12_000;
 export const CURRENT_PRICE_TTL_MS = 15 * 60 * 1000;
+const MAX_LIVE_HISTORICAL_LOOKUPS_PER_REQUEST = 2;
+const MAX_LIVE_CURRENT_LOOKUPS_PER_REQUEST = 2;
 
 type TradeSearchInput = {
   from?: string;
@@ -45,6 +47,10 @@ type PriceSnapshotInput = {
 type RequestPriceCache = {
   historical: Map<string, Promise<number | null>>;
   current: Map<string, Promise<{ price: number | null; asOf: string | null }>>;
+  historicalCachedValues: Map<string, number>;
+  currentCachedValues: Map<string, { price: number | null; asOf: string | null }>;
+  remainingLiveHistoricalLookups: number;
+  remainingLiveCurrentLookups: number;
 };
 
 type TradeLike = {
@@ -152,6 +158,33 @@ function isMissingCacheTableError(message: string) {
   return normalized.includes("does not exist") || normalized.includes("could not find the table");
 }
 
+export function collectTradePriceLookupKeys(trades: TradeLike[]) {
+  const symbols = [...new Set(
+    trades
+      .map((trade) => trade.symbol?.trim().toUpperCase() || null)
+      .filter((symbol): symbol is string => Boolean(symbol)),
+  )].sort();
+
+  const historicalLookupKeys = [...new Set(
+    trades.flatMap((trade) => {
+      const symbol = trade.symbol?.trim().toUpperCase() || null;
+      const transactionDate = trade.transaction_date?.trim() || null;
+      if (!symbol || !transactionDate) return [];
+      if (getRawExecutionClosePrice(trade.raw_payload) != null) return [];
+      return [`${symbol}:${transactionDate}`];
+    }),
+  )].sort();
+
+  const dates = historicalLookupKeys.map((entry) => entry.split(":")[1]!).sort();
+  return {
+    symbols,
+    historicalLookupKeys,
+    historicalDateRange: dates.length
+      ? { from: dates[0]!, to: dates[dates.length - 1]! }
+      : null,
+  };
+}
+
 async function finnhubFetch(path: string, apiKey: string, params: Record<string, string>) {
   const url = new URL(`${FINNHUB_BASE}${path}`);
   url.searchParams.set("token", apiKey);
@@ -192,7 +225,53 @@ export function createTradePriceRequestCache(): RequestPriceCache {
   return {
     historical: new Map(),
     current: new Map(),
+    historicalCachedValues: new Map(),
+    currentCachedValues: new Map(),
+    remainingLiveHistoricalLookups: MAX_LIVE_HISTORICAL_LOOKUPS_PER_REQUEST,
+    remainingLiveCurrentLookups: MAX_LIVE_CURRENT_LOOKUPS_PER_REQUEST,
   };
+}
+
+export async function preloadTradePriceCache(
+  sb: SupabaseClient,
+  requestCache: RequestPriceCache,
+  trades: TradeLike[],
+) {
+  const lookupKeys = collectTradePriceLookupKeys(trades);
+
+  if (lookupKeys.symbols.length) {
+    const { data: quoteRows, error } = await sb
+      .from("stock_price_quote_cache")
+      .select("symbol,current_price,fetched_at")
+      .in("symbol", lookupKeys.symbols);
+    if (error && !isMissingCacheTableError(error.message)) {
+      throw new Error(`Failed to preload stock quote cache: ${error.message}`);
+    }
+
+    for (const row of quoteRows ?? []) {
+      requestCache.currentCachedValues.set(row.symbol, {
+        price: row.current_price,
+        asOf: row.fetched_at,
+      });
+    }
+  }
+
+  if (lookupKeys.historicalLookupKeys.length && lookupKeys.historicalDateRange) {
+    const historicalSymbols = [...new Set(lookupKeys.historicalLookupKeys.map((entry) => entry.split(":")[0]!))];
+    const { data: historyRows, error } = await sb
+      .from("stock_price_history_cache")
+      .select("symbol,price_date,close_price")
+      .in("symbol", historicalSymbols)
+      .gte("price_date", lookupKeys.historicalDateRange.from)
+      .lte("price_date", lookupKeys.historicalDateRange.to);
+    if (error && !isMissingCacheTableError(error.message)) {
+      throw new Error(`Failed to preload stock price history cache: ${error.message}`);
+    }
+
+    for (const row of historyRows ?? []) {
+      requestCache.historicalCachedValues.set(`${row.symbol}:${row.price_date}`, row.close_price);
+    }
+  }
 }
 
 export async function getHistoricalTradeDateClosePrice(
@@ -207,6 +286,12 @@ export async function getHistoricalTradeDateClosePrice(
   if (existing) return existing;
 
   const request = (async () => {
+    const preloaded = requestCache.historicalCachedValues.get(cacheKey);
+    if (preloaded != null) return preloaded;
+
+    if (requestCache.remainingLiveHistoricalLookups <= 0) return null;
+    requestCache.remainingLiveHistoricalLookups -= 1;
+
     const { data: cachedRow, error: cacheError } = await sb
       .from("stock_price_history_cache")
       .select("close_price")
@@ -216,7 +301,10 @@ export async function getHistoricalTradeDateClosePrice(
     if (cacheError && !isMissingCacheTableError(cacheError.message)) {
       throw new Error(`Failed to read stock price history cache: ${cacheError.message}`);
     }
-    if (cachedRow?.close_price != null) return cachedRow.close_price;
+    if (cachedRow?.close_price != null) {
+      requestCache.historicalCachedValues.set(cacheKey, cachedRow.close_price);
+      return cachedRow.close_price;
+    }
 
     if (!env.FINNHUB_API_KEY) return null;
 
@@ -256,6 +344,11 @@ export async function getCurrentTradePrice(
   if (existing) return existing;
 
   const request = (async () => {
+    const preloaded = requestCache.currentCachedValues.get(symbol);
+    if (preloaded?.price != null && !isCurrentPriceStale({ fetchedAt: preloaded.asOf, ttlMs: CURRENT_PRICE_TTL_MS })) {
+      return preloaded;
+    }
+
     const { data: cachedRow, error: cacheError } = await sb
       .from("stock_price_quote_cache")
       .select("current_price,fetched_at")
@@ -265,27 +358,26 @@ export async function getCurrentTradePrice(
       throw new Error(`Failed to read stock quote cache: ${cacheError.message}`);
     }
 
-    if (
-      cachedRow?.current_price != null
-      && !isCurrentPriceStale({ fetchedAt: cachedRow.fetched_at, ttlMs: CURRENT_PRICE_TTL_MS })
-    ) {
-      return { price: cachedRow.current_price, asOf: cachedRow.fetched_at };
+    const cachedQuote = cachedRow?.current_price != null
+      ? { price: cachedRow.current_price, asOf: cachedRow.fetched_at }
+      : preloaded ?? { price: null, asOf: null };
+
+    if (cachedQuote.price != null && !isCurrentPriceStale({ fetchedAt: cachedQuote.asOf, ttlMs: CURRENT_PRICE_TTL_MS })) {
+      requestCache.currentCachedValues.set(symbol, cachedQuote);
+      return cachedQuote;
     }
 
+    if (requestCache.remainingLiveCurrentLookups <= 0) return cachedQuote;
+    requestCache.remainingLiveCurrentLookups -= 1;
+
     if (!env.FINNHUB_API_KEY) {
-      return {
-        price: cachedRow?.current_price ?? null,
-        asOf: cachedRow?.fetched_at ?? null,
-      };
+      return cachedQuote;
     }
 
     try {
       const currentPrice = await fetchFinnhubCurrentQuote(env.FINNHUB_API_KEY, symbol);
       if (currentPrice == null) {
-        return {
-          price: cachedRow?.current_price ?? null,
-          asOf: cachedRow?.fetched_at ?? null,
-        };
+        return cachedQuote;
       }
 
       const fetchedAt = new Date().toISOString();
@@ -299,18 +391,14 @@ export async function getCurrentTradePrice(
         throw new Error(`Failed to write stock quote cache: ${writeError.message}`);
       }
 
-      return { price: currentPrice, asOf: fetchedAt };
+      const liveQuote = { price: currentPrice, asOf: fetchedAt };
+      requestCache.currentCachedValues.set(symbol, liveQuote);
+      return liveQuote;
     } catch (error) {
       if (error instanceof FetchTimeoutError) {
-        return {
-          price: cachedRow?.current_price ?? null,
-          asOf: cachedRow?.fetched_at ?? null,
-        };
+        return cachedQuote;
       }
-      return {
-        price: cachedRow?.current_price ?? null,
-        asOf: cachedRow?.fetched_at ?? null,
-      };
+      return cachedQuote;
     }
   })();
 

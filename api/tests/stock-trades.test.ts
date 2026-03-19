@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTradeSearchParams,
+  collectTradePriceLookupKeys,
   computeTradePriceSnapshot,
   isCurrentPriceStale,
 } from "../src/lib/stock-trades.ts";
@@ -54,6 +55,36 @@ test("computeTradePriceSnapshot prefers stored trade-day close and computes delt
       currentPriceAsOf: "2026-03-18T20:15:00.000Z",
       priceChangeSinceTrade: 5.54,
       priceChangePercentSinceTrade: 4.2,
+    }
+  );
+});
+
+test("collectTradePriceLookupKeys dedupes symbols and historical lookups", () => {
+  assert.deepEqual(
+    collectTradePriceLookupKeys([
+      {
+        symbol: "NVDA",
+        transaction_date: "2024-06-14",
+        raw_payload: {},
+      },
+      {
+        symbol: "NVDA",
+        transaction_date: "2024-06-14",
+        raw_payload: {},
+      },
+      {
+        symbol: "AAPL",
+        transaction_date: "2024-06-13",
+        raw_payload: { executionClosePrice: 214.24 },
+      },
+    ]),
+    {
+      symbols: ["AAPL", "NVDA"],
+      historicalLookupKeys: ["NVDA:2024-06-14"],
+      historicalDateRange: {
+        from: "2024-06-14",
+        to: "2024-06-14",
+      },
     }
   );
 });
