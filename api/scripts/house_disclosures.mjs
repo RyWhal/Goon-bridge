@@ -4,6 +4,11 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import {
+  buildResolutionCandidateFilters,
+  normalizeMemberState,
+  resolveMemberBioguideMatch,
+} from "../src/lib/member-resolution.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -158,14 +163,6 @@ function toIsoDate(value) {
     return `${year}-${usMatch[1].padStart(2, "0")}-${usMatch[2].padStart(2, "0")}`;
   }
   return null;
-}
-
-function normalizeState(value) {
-  const normalized = asString(value)?.toUpperCase() ?? null;
-  if (!normalized) return null;
-  if (normalized.length === 2) return normalized;
-  const compact = normalized.replace(/[^A-Z ]+/g, " ").replace(/\s+/g, " ").trim();
-  return STATE_CODE_BY_NAME[compact] ?? null;
 }
 
 function normalizeOrganizationName(value) {
@@ -514,10 +511,10 @@ function parseHouseTradeRows(text) {
   return rows;
 }
 
-async function resolveMemberBioguideId(sb, { memberName, chamber, state }) {
+async function resolveMemberBioguide(sb, { memberName, chamber, state }) {
   const normalizedName = asString(memberName);
-  const normalizedState = normalizeState(state);
-  if (!normalizedName) return null;
+  const normalizedState = normalizeMemberState(state);
+  if (!normalizedName) return { bioguideId: null, confidence: null, score: null, reason: null };
 
   const candidates = [normalizedName].flatMap((value) => {
     const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
@@ -535,14 +532,31 @@ async function resolveMemberBioguideId(sb, { memberName, chamber, state }) {
   for (const member of [...(nameMatches ?? []), ...(directMatches ?? [])]) {
     byBioguide.set(member.bioguide_id, member);
   }
-
-  const filtered = [...byBioguide.values()].filter((member) => {
-    const stateMatches = !normalizedState || normalizeState(member.state) === normalizedState;
-    const chamberMatches = !chamber || !member.chamber || member.chamber.toLowerCase().includes(chamber.toLowerCase());
-    return stateMatches && chamberMatches;
+  const exactMatch = resolveMemberBioguideMatch([...byBioguide.values()], {
+    memberName: normalizedName,
+    chamber,
+    state: normalizedState,
   });
+  if (exactMatch.bioguideId) return exactMatch;
 
-  return filtered.length === 1 ? filtered[0].bioguide_id : null;
+  const surnameFilters = [...new Set(buildResolutionCandidateFilters(normalizedName))];
+  if (!surnameFilters.length) return { bioguideId: null, confidence: null, score: null, reason: "no_candidate_filters" };
+
+  let fallbackQuery = sb.from("members").select("bioguide_id,name,direct_order_name,state,chamber");
+  if (chamber) fallbackQuery = fallbackQuery.ilike("chamber", `%${chamber}%`);
+
+  const fallbackFilters = surnameFilters.flatMap((surname) => [
+    `name.ilike.%${surname}%`,
+    `direct_order_name.ilike.%${surname}%`,
+  ]);
+  const { data: fallbackMatches, error: fallbackError } = await fallbackQuery.or(fallbackFilters.join(","));
+  if (fallbackError) throw new Error(`Failed to resolve member '${normalizedName}': ${fallbackError.message}`);
+
+  return resolveMemberBioguideMatch(fallbackMatches ?? [], {
+    memberName: normalizedName,
+    chamber,
+    state: normalizedState,
+  });
 }
 
 async function resolveOrganizationId(sb, { name, ticker }) {
@@ -610,7 +624,7 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
   const archiveUrl = `${HOUSE_INDEX_BASE_URL}/${filing.year}FD.xml`;
   const memberName = [filing.lastName, filing.firstName].filter(Boolean).join(", ") || null;
   const memberState = asString(filing.stateDst)?.slice(0, 2) ?? null;
-  const memberBioguideId = await resolveMemberBioguideId(sb, {
+  const memberResolution = await resolveMemberBioguide(sb, {
     memberName,
     chamber: "House",
     state: memberState,
@@ -628,7 +642,10 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
       member_first_name: filing.firstName,
       member_last_name: filing.lastName,
       member_state: memberState,
-      member_bioguide_id: memberBioguideId,
+      member_bioguide_id: memberResolution.bioguideId,
+      member_resolution_confidence: memberResolution.confidence,
+      member_resolution_score: memberResolution.score,
+      member_resolution_reason: memberResolution.reason,
       document_url: documentUrl,
       archive_url: archiveUrl,
       filed_date: filing.filingDate,
@@ -655,6 +672,10 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
     fetch_status: "fetched",
     parse_status: extraction.text ? (parsedRows.length ? "parsed" : "quarantined") : "quarantined",
     quarantine_reason: extraction.text ? (parsedRows.length ? null : "no_rows_parsed") : "text_extraction_failed",
+    member_bioguide_id: memberResolution.bioguideId,
+    member_resolution_confidence: memberResolution.confidence,
+    member_resolution_score: memberResolution.score,
+    member_resolution_reason: memberResolution.reason,
     updated_at: new Date().toISOString(),
   }).eq("id", filingRow.id);
 
@@ -687,7 +708,7 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
         itemCount: extraction.itemCount,
       },
     });
-    return { filingId: filingRow.id, parsedRows: 0, normalizedTrades: 0, memberBioguideId: memberBioguideId ?? null };
+    return { filingId: filingRow.id, parsedRows: 0, normalizedTrades: 0, memberBioguideId: memberResolution.bioguideId ?? null };
   }
 
   let normalizedTrades = 0;
@@ -746,15 +767,18 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
       is_public_equity: row.isPublicEquity,
       parse_confidence: row.parseConfidence,
       organization_id: organizationId,
-      member_bioguide_id: memberBioguideId,
+      member_bioguide_id: memberResolution.bioguideId,
+      member_resolution_confidence: memberResolution.confidence,
+      member_resolution_score: memberResolution.score,
+      member_resolution_reason: memberResolution.reason,
       quarantine_reason: row.quarantineReason,
       raw_payload: enrichedRawPayload,
       updated_at: new Date().toISOString(),
     }, { onConflict: "source_row_key" });
 
-    if (row.isPublicEquity && memberBioguideId) {
+    if (row.isPublicEquity && memberResolution.bioguideId) {
       await sb.from("member_stock_trades").upsert({
-        bioguide_id: memberBioguideId,
+        bioguide_id: memberResolution.bioguideId,
         organization_id: organizationId,
         disclosure_filing_id: filingRow.id,
         source_type: "house_clerk_ptr",
@@ -782,7 +806,7 @@ async function processFiling(sb, filing, { finnhubApiKey, priceCache }) {
     filingId: filingRow.id,
     parsedRows: parsedRows.length,
     normalizedTrades,
-    memberBioguideId: memberBioguideId ?? null,
+    memberBioguideId: memberResolution.bioguideId ?? null,
   };
 }
 

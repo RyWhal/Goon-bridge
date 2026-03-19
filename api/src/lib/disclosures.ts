@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "./db-types.ts";
+import {
+  buildResolutionCandidateFilters,
+  normalizeMemberState,
+  resolveMemberBioguideMatch,
+} from "./member-resolution.ts";
 import { ensureOrganization, materializeMemberRelationships, normalizeOrganizationName, resolveOrganizationId } from "./relationships.ts";
 import {
   SenateEfdUnavailableError,
@@ -166,66 +171,6 @@ function formatSenateDate(date: string) {
   return `${month}/${day}/${year}`;
 }
 
-function normalizeState(value?: string | null): string | null {
-  const normalized = asString(value)?.toUpperCase() ?? null;
-  if (!normalized) return null;
-  if (normalized.length === 2) return normalized;
-  const compact = normalized.replace(/[^A-Z ]+/g, " ").replace(/\s+/g, " ").trim();
-  const states: Record<string, string> = {
-    ALABAMA: "AL",
-    ALASKA: "AK",
-    ARIZONA: "AZ",
-    ARKANSAS: "AR",
-    CALIFORNIA: "CA",
-    COLORADO: "CO",
-    CONNECTICUT: "CT",
-    DELAWARE: "DE",
-    FLORIDA: "FL",
-    GEORGIA: "GA",
-    HAWAII: "HI",
-    IDAHO: "ID",
-    ILLINOIS: "IL",
-    INDIANA: "IN",
-    IOWA: "IA",
-    KANSAS: "KS",
-    KENTUCKY: "KY",
-    LOUISIANA: "LA",
-    MAINE: "ME",
-    MARYLAND: "MD",
-    MASSACHUSETTS: "MA",
-    MICHIGAN: "MI",
-    MINNESOTA: "MN",
-    MISSISSIPPI: "MS",
-    MISSOURI: "MO",
-    MONTANA: "MT",
-    NEBRASKA: "NE",
-    NEVADA: "NV",
-    "NEW HAMPSHIRE": "NH",
-    "NEW JERSEY": "NJ",
-    "NEW MEXICO": "NM",
-    "NEW YORK": "NY",
-    "NORTH CAROLINA": "NC",
-    "NORTH DAKOTA": "ND",
-    OHIO: "OH",
-    OKLAHOMA: "OK",
-    OREGON: "OR",
-    PENNSYLVANIA: "PA",
-    "RHODE ISLAND": "RI",
-    "SOUTH CAROLINA": "SC",
-    "SOUTH DAKOTA": "SD",
-    TENNESSEE: "TN",
-    TEXAS: "TX",
-    UTAH: "UT",
-    VERMONT: "VT",
-    VIRGINIA: "VA",
-    WASHINGTON: "WA",
-    "WEST VIRGINIA": "WV",
-    WISCONSIN: "WI",
-    WYOMING: "WY",
-    "DISTRICT OF COLUMBIA": "DC",
-  };
-  return states[compact] ?? null;
-}
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -585,7 +530,7 @@ async function logDisclosureFailure(sb: DbClient, failure: Database["public"]["T
   await sb.from("disclosure_ingest_failures").insert(failure);
 }
 
-async function resolveMemberBioguideId(
+async function resolveMemberBioguide(
   sb: DbClient,
   {
     memberName,
@@ -596,10 +541,12 @@ async function resolveMemberBioguideId(
     chamber?: string | null;
     state?: string | null;
   }
-): Promise<string | null> {
-  const normalizedState = normalizeState(state);
+): Promise<{ bioguideId: string | null; confidence: string | null; score: number | null; reason: string | null }> {
+  const normalizedState = normalizeMemberState(state);
   const normalizedName = asString(memberName);
-  if (!normalizedName) return null;
+  if (!normalizedName) {
+    return { bioguideId: null, confidence: null, score: null, reason: null };
+  }
 
   const candidates = [normalizedName]
     .flatMap((value) => {
@@ -625,31 +572,50 @@ async function resolveMemberBioguideId(
   if (nameError) throw new Error(`Failed to resolve member '${normalizedName}': ${nameError.message}`);
   if (directError) throw new Error(`Failed to resolve member '${normalizedName}': ${directError.message}`);
 
-  const byBioguide = new Map<string, NonNullable<typeof nameMatches>[number]>();
+  const byBioguide = new Map<string, {
+    bioguide_id: string;
+    name: string | null;
+    direct_order_name: string | null;
+    state: string | null;
+    chamber: string | null;
+  }>();
   for (const member of [...(nameMatches ?? []), ...(directNameMatches ?? [])]) {
     byBioguide.set(member.bioguide_id, member);
   }
-  const data = [...byBioguide.values()];
-
-  const filtered = (data ?? []).filter((member) => {
-    const stateMatches = !normalizedState || normalizeState(member.state) === normalizedState;
-    const chamberMatches = !chamber || !member.chamber || member.chamber.toLowerCase().includes(chamber.toLowerCase());
-    return stateMatches && chamberMatches;
+  const exactMatch = resolveMemberBioguideMatch([...byBioguide.values()], {
+    memberName: normalizedName,
+    chamber,
+    state: normalizedState,
   });
+  if (exactMatch.bioguideId) return exactMatch;
 
-  if (filtered.length === 1) return filtered[0].bioguide_id;
+  const surnameFilters = [...new Set(buildResolutionCandidateFilters(normalizedName))];
+  if (!surnameFilters.length) {
+    return { bioguideId: null, confidence: null, score: null, reason: "no_candidate_filters" };
+  }
 
-  const exactMatches = (data ?? []).filter((member) => {
-    const directNames = [member.name, member.direct_order_name].filter(Boolean).map((value) => value!.toLowerCase());
-    return directNames.includes(normalizedName.toLowerCase())
-      && (!normalizedState || normalizeState(member.state) === normalizedState);
+  let fallbackQuery = sb
+    .from("members")
+    .select("bioguide_id,name,direct_order_name,state,chamber");
+
+  if (chamber) fallbackQuery = fallbackQuery.ilike("chamber", `%${chamber}%`);
+
+  const fallbackFilters = surnameFilters.flatMap((surname) => [
+    `name.ilike.%${surname}%`,
+    `direct_order_name.ilike.%${surname}%`,
+  ]);
+  const { data: fallbackMatches, error: fallbackError } = await fallbackQuery.or(fallbackFilters.join(","));
+  if (fallbackError) throw new Error(`Failed to resolve member '${normalizedName}': ${fallbackError.message}`);
+
+  return resolveMemberBioguideMatch(fallbackMatches ?? [], {
+    memberName: normalizedName,
+    chamber,
+    state: normalizedState,
   });
-
-  return exactMatches.length === 1 ? exactMatches[0].bioguide_id : null;
 }
 
 async function upsertDisclosureFiling(sb: DbClient, filing: DisclosureSourceFiling) {
-  const memberBioguideId = await resolveMemberBioguideId(sb, {
+  const memberResolution = await resolveMemberBioguide(sb, {
     memberName: filing.memberName,
     chamber: filing.chamber,
     state: filing.memberState ?? filing.candidateState,
@@ -665,7 +631,10 @@ async function upsertDisclosureFiling(sb: DbClient, filing: DisclosureSourceFili
     member_first_name: filing.memberFirstName,
     member_last_name: filing.memberLastName,
     member_state: filing.memberState,
-    member_bioguide_id: memberBioguideId,
+    member_bioguide_id: memberResolution.bioguideId,
+    member_resolution_confidence: memberResolution.confidence,
+    member_resolution_score: memberResolution.score,
+    member_resolution_reason: memberResolution.reason,
     candidate_state: filing.candidateState,
     document_url: filing.documentUrl,
     archive_url: filing.archiveUrl,
@@ -720,12 +689,19 @@ async function upsertTradeRows(
   const affectedMembers = new Set<string>();
 
   for (const row of rows) {
-    const memberBioguideId = filing.member_bioguide_id ?? await resolveMemberBioguideId(sb, {
-      memberName: filing.member_name,
-      chamber: filing.chamber,
-      state: filing.member_state ?? filing.candidate_state,
-    });
-    if (memberBioguideId) affectedMembers.add(memberBioguideId);
+    const memberResolution = filing.member_bioguide_id
+      ? {
+          bioguideId: filing.member_bioguide_id,
+          confidence: filing.member_resolution_confidence,
+          score: filing.member_resolution_score,
+          reason: filing.member_resolution_reason,
+        }
+      : await resolveMemberBioguide(sb, {
+          memberName: filing.member_name,
+          chamber: filing.chamber,
+          state: filing.member_state ?? filing.candidate_state,
+        });
+    if (memberResolution.bioguideId) affectedMembers.add(memberResolution.bioguideId);
 
     let organizationId: number | null = null;
     if (row.isPublicEquity) {
@@ -762,7 +738,10 @@ async function upsertTradeRows(
       is_public_equity: row.isPublicEquity,
       parse_confidence: row.parseConfidence,
       organization_id: organizationId,
-      member_bioguide_id: memberBioguideId,
+      member_bioguide_id: memberResolution.bioguideId,
+      member_resolution_confidence: memberResolution.confidence,
+      member_resolution_score: memberResolution.score,
+      member_resolution_reason: memberResolution.reason,
       quarantine_reason: row.quarantineReason,
       raw_payload: row.rawPayload,
       updated_at: new Date().toISOString(),
@@ -1121,7 +1100,7 @@ async function processDisclosureFiling(
   const metadataFromText = extraction.text ? extractMemberMetadataFromText(extraction.text) : { memberName: null, filedDate: null };
   const nextMemberName = filing.member_name ?? metadataFromText.memberName;
   const nextFiledDate = filing.filed_date ?? metadataFromText.filedDate;
-  const nextBioguideId = await resolveMemberBioguideId(sb, {
+  const nextMemberResolution = await resolveMemberBioguide(sb, {
     memberName: nextMemberName,
     chamber: filing.chamber,
     state: filing.member_state ?? filing.candidate_state,
@@ -1130,7 +1109,10 @@ async function processDisclosureFiling(
   await sb.from("disclosure_filings").update({
     checksum_sha256: checksum,
     member_name: nextMemberName,
-    member_bioguide_id: nextBioguideId,
+    member_bioguide_id: nextMemberResolution.bioguideId,
+    member_resolution_confidence: nextMemberResolution.confidence,
+    member_resolution_score: nextMemberResolution.score,
+    member_resolution_reason: nextMemberResolution.reason,
     filed_date: nextFiledDate,
     fetch_status: "fetched",
     parse_status: extraction.status === "failed" ? "quarantined" : "parsed",
@@ -1157,7 +1139,10 @@ async function processDisclosureFiling(
   const tradeRowsResult = await upsertTradeRows(sb, {
     ...filing,
     member_name: nextMemberName,
-    member_bioguide_id: nextBioguideId,
+    member_bioguide_id: nextMemberResolution.bioguideId,
+    member_resolution_confidence: nextMemberResolution.confidence,
+    member_resolution_score: nextMemberResolution.score,
+    member_resolution_reason: nextMemberResolution.reason,
     filed_date: nextFiledDate,
   }, parsedRows);
   const normalized = await normalizeTradeRowsForFiling(sb, filing.id);

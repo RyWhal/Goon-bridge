@@ -791,6 +791,9 @@ interface DisclosureFilingsRow {
   member_last_name: string | null;
   member_state: string | null;
   member_bioguide_id: string | null;
+  member_resolution_confidence: string | null;
+  member_resolution_score: number | null;
+  member_resolution_reason: string | null;
   candidate_state: string | null;
   document_url: string | null;
   archive_url: string | null;
@@ -818,6 +821,9 @@ interface DisclosureFilingsInsert {
   member_last_name?: string | null;
   member_state?: string | null;
   member_bioguide_id?: string | null;
+  member_resolution_confidence?: string | null;
+  member_resolution_score?: number | null;
+  member_resolution_reason?: string | null;
   candidate_state?: string | null;
   document_url?: string | null;
   archive_url?: string | null;
@@ -876,6 +882,9 @@ interface DisclosureTradeRowsRow {
   parse_confidence: string | null;
   organization_id: number | null;
   member_bioguide_id: string | null;
+  member_resolution_confidence: string | null;
+  member_resolution_score: number | null;
+  member_resolution_reason: string | null;
   quarantine_reason: string | null;
   raw_payload: Record<string, unknown>;
   created_at: string;
@@ -901,6 +910,9 @@ interface DisclosureTradeRowsInsert {
   parse_confidence?: string | null;
   organization_id?: number | null;
   member_bioguide_id?: string | null;
+  member_resolution_confidence?: string | null;
+  member_resolution_score?: number | null;
+  member_resolution_reason?: string | null;
   quarantine_reason?: string | null;
   raw_payload?: Record<string, unknown>;
   created_at?: string;
