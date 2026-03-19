@@ -135,6 +135,32 @@ const CORRELATION_JOBS: JobConfig[] = [
   },
 ];
 
+const CONGRESS_JOBS: JobConfig[] = [
+  {
+    id: "warm-bills-cache",
+    label: "Warm Bills Cache",
+    description: "Fetch recent Congress.gov bill pages and upsert them into Supabase",
+    endpoint: "/api/congress/refresh/bills",
+    params: [
+      { name: "congress", label: "Congress", type: "number", placeholder: "119" },
+      { name: "type", label: "Bill Type", type: "text", placeholder: "optional (hr, s, hres)" },
+      { name: "pageSize", label: "Page Size", type: "number", placeholder: "100" },
+      { name: "maxPages", label: "Max Pages", type: "number", placeholder: "5" },
+      {
+        name: "sort",
+        label: "Sort",
+        type: "select",
+        options: [
+          { value: "updateDate+desc", label: "Updated desc" },
+          { value: "introducedDate+desc", label: "Introduced desc" },
+          { value: "updateDate+asc", label: "Updated asc" },
+          { value: "introducedDate+asc", label: "Introduced asc" },
+        ],
+      },
+    ],
+  },
+];
+
 function buildUrl(endpoint: string, params: Record<string, string>): string {
   let url = endpoint;
 
@@ -344,6 +370,15 @@ export function AdminPanel() {
         <h3 className="text-xs font-semibold uppercase tracking-widest text-vibe-dim">Correlations</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           {CORRELATION_JOBS.map((job) => (
+            <JobCard key={job.id} job={job} onRun={runJob} running={runningJobs.has(job.id)} />
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h3 className="text-xs font-semibold uppercase tracking-widest text-vibe-dim">Congress</h3>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {CONGRESS_JOBS.map((job) => (
             <JobCard key={job.id} job={job} onRun={runJob} running={runningJobs.has(job.id)} />
           ))}
         </div>

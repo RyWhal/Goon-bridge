@@ -7,6 +7,7 @@ import {
   refreshHouseDisclosures,
   refreshSenateDisclosures,
 } from "../lib/disclosures";
+import { SenateEfdUnavailableError } from "../lib/senate-efd";
 import { hasSupabase, isValidDate, parseLimit } from "../lib/validation";
 
 const disclosures = new Hono<Env>();
@@ -356,6 +357,16 @@ disclosures.post("/refresh/senate", async (c) => {
     const result = await refreshSenateDisclosures(getSupabase(c.env), { ...window, limit });
     return c.json({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof SenateEfdUnavailableError) {
+      return c.json(
+        {
+          error: "Failed to refresh Senate disclosures",
+          detail: error.message,
+        },
+        503
+      );
+    }
+
     return c.json(
       {
         error: "Failed to refresh Senate disclosures",

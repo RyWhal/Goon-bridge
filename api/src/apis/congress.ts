@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { summarizeMemberVotes, type MemberVoteRecord } from "../lib/member-votes";
+import { prepareBillCacheRowsForUpsert, resolveBillWarmRequest } from "../lib/bill-cache";
 import { getSupabase } from "../lib/supabase";
 import { FetchTimeoutError, fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { hasSupabase, parseBoundedInt } from "../lib/validation";
+import { requireAdminAuth } from "../middleware/admin-auth";
 
 const congress = new Hono<Env>();
+congress.use("/refresh/*", requireAdminAuth);
 
 const BASE = "https://api.congress.gov/v3";
 const CONGRESS_FETCH_TIMEOUT_MS = 15_000;
@@ -1782,7 +1785,70 @@ async function upsertCachedBills(env: Env["Bindings"], rows: Array<Record<string
   if (!hasSupabase(env) || rows.length === 0) return;
 
   const sb = getSupabase(env);
-  await sb.from("bills").upsert(rows, { onConflict: "congress,bill_type,bill_number" });
+  await sb
+    .from("bills")
+    .upsert(prepareBillCacheRowsForUpsert(rows), { onConflict: "congress,bill_type,bill_number" });
+}
+
+async function warmBillsCache(
+  env: Env["Bindings"],
+  apiKey: string,
+  options: ReturnType<typeof resolveBillWarmRequest>
+) {
+  let pagesWarmed = 0;
+  let billsSeen = 0;
+  let billsUpserted = 0;
+  let newestLatestActionDate: string | null = null;
+  let newestUpdateDate: string | null = null;
+
+  for (let pageIndex = 0; pageIndex < options.maxPages; pageIndex += 1) {
+    const offset = pageIndex * options.pageSize;
+    const data = await fetchCongressBillsPage(
+      apiKey,
+      options.congress,
+      options.billType,
+      options.pageSize,
+      offset,
+      options.sort
+    );
+    const pageBills = data.bills ?? [];
+    if (pageBills.length === 0) break;
+
+    const cacheRows = pageBills
+      .map((bill) => toBillCacheRow(bill))
+      .filter(Boolean) as Array<Record<string, unknown>>;
+
+    if (cacheRows.length > 0) {
+      await upsertCachedBills(env, cacheRows);
+      billsUpserted += cacheRows.length;
+    }
+
+    billsSeen += pageBills.length;
+    pagesWarmed += 1;
+
+    const firstBill = pageBills[0];
+    if (!newestLatestActionDate && firstBill?.latestAction?.actionDate) {
+      newestLatestActionDate = firstBill.latestAction.actionDate;
+    }
+    if (!newestUpdateDate && firstBill?.updateDate) {
+      newestUpdateDate = firstBill.updateDate;
+    }
+
+    if (!data.pagination?.next || pageBills.length < options.pageSize) break;
+  }
+
+  return {
+    congress: Number.parseInt(options.congress, 10),
+    bill_type: options.billType,
+    sort: options.sort,
+    page_size: options.pageSize,
+    max_pages_requested: options.maxPages,
+    pages_warmed: pagesWarmed,
+    bills_seen: billsSeen,
+    bills_upserted: billsUpserted,
+    newest_latest_action_date: newestLatestActionDate,
+    newest_update_date: newestUpdateDate,
+  };
 }
 
 async function fetchCongressBillsPage(
@@ -3075,6 +3141,42 @@ async function cacheMemberVotesToSupabase(
     // Best-effort
   }
 }
+
+// ── GET /api/congress/bills ──────────────────────────────────────────────────
+congress.post("/refresh/bills", async (c) => {
+  const apiKey = c.env.CONGRESS_API_KEY;
+  if (!apiKey) return c.json({ error: "Congress API key not configured" }, 500);
+  if (!hasSupabase(c.env)) {
+    return c.json({ error: "Supabase not configured" }, 503);
+  }
+
+  const options = resolveBillWarmRequest(c.req.query("congress"), c.req.query("type"), {
+    pageSize: c.req.query("pageSize"),
+    maxPages: c.req.query("maxPages"),
+    sort: c.req.query("sort"),
+  });
+
+  try {
+    const result = await warmBillsCache(c.env, apiKey, options);
+    return c.json(
+      {
+        ok: true,
+        job: "warm-bills-cache",
+        ...result,
+      },
+      200,
+      { "Cache-Control": "no-store" }
+    );
+  } catch (error) {
+    if (error instanceof FetchTimeoutError) {
+      return c.json({ error: error.message }, 504);
+    }
+    return c.json(
+      { error: error instanceof Error ? error.message : "Failed to warm bill cache" },
+      502
+    );
+  }
+});
 
 // ── GET /api/congress/bills ──────────────────────────────────────────────────
 congress.get("/bills", async (c) => {

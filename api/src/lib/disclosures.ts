@@ -1,6 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "./db-types";
 import { ensureOrganization, materializeMemberRelationships, normalizeOrganizationName, resolveOrganizationId } from "./relationships";
+import {
+  SenateEfdUnavailableError,
+  isSenateMaintenanceResponse,
+  shouldRetrySenateEfdRequest,
+  summarizeUpstreamHtml,
+} from "./senate-efd";
+import { sanitizeJsonStrings, sanitizePostgresText } from "./unicode-safety";
 
 type DbClient = SupabaseClient;
 type JsonRecord = Record<string, unknown>;
@@ -664,6 +671,9 @@ async function upsertFilingText(
   filingId: number,
   extraction: { text: string | null; method: string; status: string; diagnostics: JsonRecord }
 ) {
+  const sanitizedText = sanitizePostgresText(extraction.text);
+  const sanitizedDiagnostics = sanitizeJsonStrings(extraction.diagnostics);
+
   const { error } = await sb
     .from("disclosure_filing_text")
     .upsert({
@@ -671,8 +681,8 @@ async function upsertFilingText(
       parser_version: DISCLOSURE_PARSER_VERSION,
       extraction_method: extraction.method,
       extraction_status: extraction.status,
-      extracted_text: extraction.text,
-      parse_diagnostics: extraction.diagnostics,
+      extracted_text: sanitizedText,
+      parse_diagnostics: sanitizedDiagnostics,
       updated_at: new Date().toISOString(),
     }, {
       onConflict: "filing_id,parser_version",
@@ -884,6 +894,10 @@ async function senateSession() {
   };
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function parseSenateResultsPayload(payload: unknown): DisclosureSourceFiling[] {
   const record = jsonRecord(payload);
   const rows = Array.isArray(record.data) ? record.data : [];
@@ -947,30 +961,53 @@ async function fetchSenateDisclosures(from: string, to: string): Promise<Disclos
     "order[0][column]": "2",
     "order[0][dir]": "desc",
   });
+  const maxAttempts = 3;
 
-  const response = await fetch(SENATE_REPORT_DATA_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-CSRFToken": session.csrfToken,
-      Referer: SENATE_SEARCH_URL,
-      Cookie: session.cookie,
-      "X-Requested-With": "XMLHttpRequest",
-    },
-    body: body.toString(),
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(SENATE_REPORT_DATA_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-CSRFToken": session.csrfToken,
+        Referer: SENATE_SEARCH_URL,
+        Cookie: session.cookie,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: body.toString(),
+    });
 
-  const contentType = response.headers.get("content-type") ?? "";
-  const rawText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Senate report data fetch failed (${response.status}): ${rawText.slice(0, 300)}`);
+    const contentType = response.headers.get("content-type") ?? "";
+    const rawText = await response.text();
+    const summary = summarizeUpstreamHtml(rawText);
+
+    if (response.ok) {
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Senate report data returned non-JSON content: ${summary.slice(0, 120)}`);
+      }
+
+      const parsed = JSON.parse(rawText) as unknown;
+      return parseSenateResultsPayload(parsed);
+    }
+
+    if (shouldRetrySenateEfdRequest(response.status, rawText, attempt, maxAttempts)) {
+      await sleep(500 * attempt);
+      continue;
+    }
+
+    if (isSenateMaintenanceResponse(response.status, rawText)) {
+      throw new SenateEfdUnavailableError(
+        `Senate eFD upstream is under maintenance (${response.status}). Retry later.`,
+        response.status
+      );
+    }
+
+    throw new Error(`Senate report data fetch failed (${response.status}): ${summary}`);
   }
-  if (!contentType.includes("application/json")) {
-    throw new Error(`Senate report data returned non-JSON content: ${rawText.slice(0, 120)}`);
-  }
 
-  const parsed = JSON.parse(rawText) as unknown;
-  return parseSenateResultsPayload(parsed);
+  throw new SenateEfdUnavailableError(
+    "Senate eFD upstream remained unavailable after 3 attempts. Retry later.",
+    503
+  );
 }
 
 async function fetchHouseDisclosures(from: string, to: string, limit?: number): Promise<DisclosureSourceFiling[]> {
