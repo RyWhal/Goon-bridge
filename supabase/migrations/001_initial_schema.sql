@@ -137,7 +137,8 @@ CREATE POLICY "Allow service write" ON contributions FOR ALL USING (true) WITH C
 -- ============================================================================
 
 -- Top donors by employer for a given candidate
-CREATE OR REPLACE VIEW donor_summary AS
+CREATE OR REPLACE VIEW donor_summary
+WITH (security_invoker = true) AS
 SELECT
   c.candidate_id,
   fc.bioguide_id,
@@ -153,7 +154,8 @@ WHERE c.contributor_employer IS NOT NULL
 GROUP BY c.candidate_id, fc.bioguide_id, c.contributor_employer;
 
 -- Member voting record with bill info
-CREATE OR REPLACE VIEW member_voting_record AS
+CREATE OR REPLACE VIEW member_voting_record
+WITH (security_invoker = true) AS
 SELECT
   mv.bioguide_id,
   m.name AS member_name,

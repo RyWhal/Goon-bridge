@@ -159,7 +159,8 @@ $$;
 
 DROP VIEW IF EXISTS member_voting_record;
 
-CREATE VIEW member_voting_record AS
+CREATE VIEW member_voting_record
+WITH (security_invoker = true) AS
 SELECT
   mv.bioguide_id,
   m.name AS member_name,
