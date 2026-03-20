@@ -5,6 +5,7 @@ import { BillSearch } from "./components/BillSearch";
 import { FecSearch } from "./components/FecSearch";
 import { CorporationSearch } from "./components/CorporationSearch";
 import { CorrelationExplorer } from "./components/CorrelationExplorer";
+import { PolicyMappingExplorer } from "./components/PolicyMappingExplorer";
 import { StockTradeExplorer } from "./components/StockTradeExplorer";
 import { AdminPanel } from "./components/AdminPanel";
 import {
@@ -172,6 +173,7 @@ export default function App() {
         {route.page === "main" && route.tab === "corporations" && <CorporationSearch />}
         {route.page === "main" && route.tab === "trades" && <StockTradeExplorer />}
         {route.page === "experimental" && route.tab === "correlations" && <CorrelationExplorer />}
+        {route.page === "experimental" && route.tab === "policy-maps" && <PolicyMappingExplorer />}
         {isAdmin && <AdminPanel />}
       </main>
 

@@ -51,7 +51,7 @@ export function useApi<T>() {
 
     const request = (async () => {
       try {
-        const resp = await fetch(url);
+        const resp = await fetch(url, { cache: "no-store" });
         if (!resp.ok) {
           // Read body as text first, then try to parse as JSON.
           // This avoids losing the error detail when the body isn't JSON

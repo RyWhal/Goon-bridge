@@ -6,7 +6,10 @@ export const MAIN_TABS = [
   { id: "trades", label: "Stock Trades" },
 ] as const;
 
-export const EXPERIMENTAL_TABS = [{ id: "correlations", label: "Correlations" }] as const;
+export const EXPERIMENTAL_TABS = [
+  { id: "correlations", label: "Correlations" },
+  { id: "policy-maps", label: "Policy Maps" },
+] as const;
 
 export type MainTabId = (typeof MAIN_TABS)[number]["id"];
 export type ExperimentalTabId = (typeof EXPERIMENTAL_TABS)[number]["id"];
@@ -25,6 +28,10 @@ export function getRouteState(pathname: string): RouteState {
     return { page: "experimental", tab: "correlations" };
   }
 
+  if (pathname === "/experimental/policy-maps") {
+    return { page: "experimental", tab: "policy-maps" };
+  }
+
   return { page: "main", tab: "members" };
 }
 
@@ -34,6 +41,10 @@ export function getPathForRoute(route: RouteState): string {
   }
 
   if (route.page === "experimental") {
+    if (route.tab === "policy-maps") {
+      return "/experimental/policy-maps";
+    }
+
     return "/experimental/correlations";
   }
 

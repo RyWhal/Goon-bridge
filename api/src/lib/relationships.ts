@@ -1,5 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "./db-types";
+import {
+  buildCommitteeAssignmentRow,
+  buildCommitteeKey,
+  collapseCommitteeToTopLevel,
+  normalizeCommitteeLabel,
+} from "./committee-normalization.ts";
 
 type DbClient = SupabaseClient;
 
@@ -981,13 +987,20 @@ export function extractCommitteeAssignmentsFromMemberDetail(memberDetail: JsonRe
     return !!name && !/subcommittee/i.test(name);
   });
 
-  const deduped = new Map<string, CommitteeAssignmentRecord>();
+  const deduped = new Map<string | null, CommitteeAssignmentRecord>();
 
   for (const committee of committeeCandidates) {
     const committeeName = extractCommitteeName(committee);
     if (!committeeName) continue;
-    const normalizedName = normalizeOrganizationName(committeeName);
-    if (!normalizedName) continue;
+    const collapsedCommittee = collapseCommitteeToTopLevel(committeeName, {
+      chamber: asString(committee.chamber),
+    });
+    const committeeCode = asString(committee.systemCode) ?? asString(committee.code);
+    const committeeKey = buildCommitteeKey({
+      committeeCode,
+      normalizedName: collapsedCommittee.normalizedName,
+      chamber: collapsedCommittee.chamber,
+    });
 
     const subcommitteeEntries = [
       ...findArraysByLikelyKey(committee, /subcommittee/i),
@@ -1007,11 +1020,11 @@ export function extractCommitteeAssignmentsFromMemberDetail(memberDetail: JsonRe
       })
       .filter((entry): entry is NonNullable<typeof entry> => !!entry);
 
-    deduped.set(normalizedName, {
-      committeeCode: asString(committee.systemCode) ?? asString(committee.code),
+    deduped.set(committeeKey, {
+      committeeCode,
       committeeName,
       role: asString(committee.role) ?? asString(committee.title),
-      chamber: asString(committee.chamber),
+      chamber: collapsedCommittee.chamber,
       congress: asNumber(committee.congress),
       rawPayload: committee,
       subcommittees,
@@ -1040,46 +1053,61 @@ export async function replaceMemberCommitteeAssignments(
 
   if (!assignments.length) return { committees: 0, subcommittees: 0 };
 
-  const committeeInsertPayloads = assignments.map((assignment) => ({
-    bioguide_id: bioguideId,
-    committee_code: assignment.committeeCode,
-    committee_name: assignment.committeeName,
-    normalized_committee_name: normalizeOrganizationName(assignment.committeeName),
-    chamber: assignment.chamber,
-    congress: assignment.congress,
-    role: assignment.role,
-    source_row_key: `${bioguideId}:committee:${normalizeOrganizationName(assignment.committeeName)}`,
-    raw_payload: assignment.rawPayload,
-  }));
+  const committeeInsertPayloads = assignments.map((assignment) => {
+    return {
+      ...buildCommitteeAssignmentRow({
+        bioguideId,
+        committeeName: assignment.committeeName,
+        committeeCode: assignment.committeeCode,
+        chamber: assignment.chamber,
+      }),
+      congress: assignment.congress,
+      role: assignment.role,
+      raw_payload: assignment.rawPayload,
+    };
+  });
 
   const { data: insertedCommittees, error: insertCommitteesError } = await sb
     .from("member_committee_assignments")
     .insert(committeeInsertPayloads)
-    .select("id,committee_name,normalized_committee_name");
+    .select("id,committee_key");
 
   if (insertCommitteesError) {
     throw new Error(`Failed to insert committee assignments: ${insertCommitteesError.message}`);
   }
 
   const committeeIds = new Map<string, number>();
-  for (const row of insertedCommittees ?? []) {
-    committeeIds.set(row.normalized_committee_name, row.id);
+  for (const row of (insertedCommittees ?? []) as Array<{
+    id: number;
+    committee_key: string | null;
+  }>) {
+    if (row.committee_key) {
+      committeeIds.set(row.committee_key, row.id);
+    }
   }
 
   const subcommitteeInsertPayloads = assignments.flatMap((assignment) => {
-    const committeeId = committeeIds.get(normalizeOrganizationName(assignment.committeeName));
+    const collapsedCommittee = collapseCommitteeToTopLevel(assignment.committeeName, {
+      chamber: assignment.chamber,
+    });
+    const committeeKey = buildCommitteeKey({
+      committeeCode: assignment.committeeCode,
+      normalizedName: collapsedCommittee.normalizedName,
+      chamber: collapsedCommittee.chamber,
+    });
+    const committeeId = committeeKey ? committeeIds.get(committeeKey) : undefined;
     return assignment.subcommittees.map((subcommittee) => ({
       bioguide_id: bioguideId,
       committee_assignment_id: committeeId ?? null,
       parent_committee_code: assignment.committeeCode,
-      parent_committee_name: assignment.committeeName,
+      parent_committee_name: collapsedCommittee.normalizedName,
       subcommittee_code: subcommittee.subcommitteeCode,
       subcommittee_name: subcommittee.subcommitteeName,
-      normalized_subcommittee_name: normalizeOrganizationName(subcommittee.subcommitteeName),
+      normalized_subcommittee_name: normalizeCommitteeLabel(subcommittee.subcommitteeName),
       chamber: assignment.chamber,
       congress: assignment.congress,
       role: subcommittee.role,
-      source_row_key: `${bioguideId}:subcommittee:${normalizeOrganizationName(subcommittee.subcommitteeName)}`,
+      source_row_key: `${bioguideId}:subcommittee:${normalizeCommitteeLabel(subcommittee.subcommitteeName)}`,
       raw_payload: subcommittee.rawPayload,
     }));
   });
@@ -1206,6 +1234,7 @@ export async function materializeMemberRelationships(sb: DbClient, bioguideId: s
       source_table: "member_committee_assignments",
       source_row_id: String(committee.id),
       evidence_payload: {
+        committeeKey: committee.committee_key,
         committeeName: committee.committee_name,
         committeeCode: committee.committee_code,
         role: committee.role,
