@@ -1,16 +1,17 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../types";
-import type { MemberVoteStats } from "../lib/member-votes";
-import { getSupabase } from "../lib/supabase";
-import { requireAdminAuth } from "../middleware/admin-auth";
+import type { MemberVoteStats } from "../lib/member-votes.ts";
+import { getSupabase } from "../lib/supabase.ts";
+import { requireAdminAuth } from "../middleware/admin-auth.ts";
 import {
   fetchOfficialCommitteeAssignments,
   materializeMemberRelationships,
   persistFinnhubActivity,
   refreshOrganizationsFromContributions,
   replaceMemberCommitteeAssignments,
-} from "../lib/relationships";
-import { hasSupabase, parseLimit, parseOffset } from "../lib/validation";
+} from "../lib/relationships.ts";
+import { refreshPolicyCommitteeMappings } from "../lib/policy-committee-maps.ts";
+import { hasSupabase, parseBoundedInt, parseLimit, parseOffset } from "../lib/validation.ts";
 
 const correlation = new Hono<Env>();
 
@@ -33,6 +34,36 @@ async function fetchInternalJson<T>(c: Context<Env>, path: string): Promise<T> {
   }
   return await response.json() as T;
 }
+
+correlation.post("/refresh/policy-committee-map", async (c) => {
+  if (!hasSupabase(c.env)) {
+    return c.json({ error: "Supabase not configured" }, 503);
+  }
+
+  const congress = parseBoundedInt(c.req.query("congress"), 119, 1, 999);
+  const sb = getSupabase(c.env);
+
+  try {
+    const result = await refreshPolicyCommitteeMappings(sb, congress);
+    return c.json(
+      {
+        ok: true,
+        job: "refresh-policy-committee-map",
+        congress,
+        ...result,
+      },
+      200,
+      { "Cache-Control": "no-store" }
+    );
+  } catch (error) {
+    return c.json(
+      {
+        error: error instanceof Error ? error.message : "Failed to refresh policy committee mappings",
+      },
+      502
+    );
+  }
+});
 
 // ── GET /api/correlation/member/:bioguideId ──────────────────────────────────
 correlation.get("/member/:bioguideId", async (c) => {

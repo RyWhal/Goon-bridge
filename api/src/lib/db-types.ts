@@ -121,6 +121,48 @@ export interface Database {
         Update: Partial<OrganizationContractAwardsInsert>;
         Relationships: [];
       };
+      committees: {
+        Row: CommitteesRow;
+        Insert: CommitteesInsert;
+        Update: Partial<CommitteesInsert>;
+        Relationships: [];
+      };
+      committee_aliases: {
+        Row: CommitteeAliasesRow;
+        Insert: CommitteeAliasesInsert;
+        Update: Partial<CommitteeAliasesInsert>;
+        Relationships: [];
+      };
+      committee_match_review_queue: {
+        Row: CommitteeMatchReviewQueueRow;
+        Insert: CommitteeMatchReviewQueueInsert;
+        Update: Partial<CommitteeMatchReviewQueueInsert>;
+        Relationships: [];
+      };
+      committee_jurisdiction_seeds: {
+        Row: CommitteeJurisdictionSeedsRow;
+        Insert: CommitteeJurisdictionSeedsInsert;
+        Update: Partial<CommitteeJurisdictionSeedsInsert>;
+        Relationships: [];
+      };
+      policy_area_committee_map: {
+        Row: PolicyAreaCommitteeMapRow;
+        Insert: PolicyAreaCommitteeMapInsert;
+        Update: Partial<PolicyAreaCommitteeMapInsert>;
+        Relationships: [];
+      };
+      policy_area_committee_evidence: {
+        Row: PolicyAreaCommitteeEvidenceRow;
+        Insert: PolicyAreaCommitteeEvidenceInsert;
+        Update: Partial<PolicyAreaCommitteeEvidenceInsert>;
+        Relationships: [];
+      };
+      policy_area_committee_overrides: {
+        Row: PolicyAreaCommitteeOverridesRow;
+        Insert: PolicyAreaCommitteeOverridesInsert;
+        Update: Partial<PolicyAreaCommitteeOverridesInsert>;
+        Relationships: [];
+      };
       member_committee_assignments: {
         Row: MemberCommitteeAssignmentsRow;
         Insert: MemberCommitteeAssignmentsInsert;
@@ -713,12 +755,209 @@ interface OrganizationContractAwardsInsert {
   updated_at?: string;
 }
 
+interface CommitteesRow {
+  id: number;
+  committee_key: string;
+  committee_code: string | null;
+  name: string;
+  normalized_name: string;
+  chamber: string | null;
+  is_subcommittee: boolean;
+  parent_committee_id: number | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CommitteesInsert {
+  id?: number;
+  committee_key: string;
+  committee_code?: string | null;
+  name: string;
+  normalized_name: string;
+  chamber?: string | null;
+  is_subcommittee?: boolean;
+  parent_committee_id?: number | null;
+  source: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface CommitteeAliasesRow {
+  id: number;
+  committee_key: string;
+  alias: string;
+  normalized_alias: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CommitteeAliasesInsert {
+  id?: number;
+  committee_key: string;
+  alias: string;
+  normalized_alias: string;
+  source: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface CommitteeMatchReviewQueueRow {
+  id: number;
+  source_type: string;
+  source_value: string;
+  normalized_source_value: string;
+  chamber: string | null;
+  review_status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CommitteeMatchReviewQueueInsert {
+  id?: number;
+  source_type: string;
+  source_value: string;
+  normalized_source_value: string;
+  chamber?: string | null;
+  review_status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface CommitteeJurisdictionSeedsRow {
+  id: number;
+  committee_key: string;
+  committee_id: number | null;
+  congress: number;
+  source_version: string;
+  source_url: string;
+  jurisdiction_text: string;
+  jurisdiction_summary: string | null;
+  effective_start_date: string | null;
+  effective_end_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CommitteeJurisdictionSeedsInsert {
+  id?: number;
+  committee_key: string;
+  committee_id?: number | null;
+  congress: number;
+  source_version: string;
+  source_url: string;
+  jurisdiction_text: string;
+  jurisdiction_summary?: string | null;
+  effective_start_date?: string | null;
+  effective_end_date?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface PolicyAreaCommitteeMapRow {
+  id: number;
+  policy_area: string;
+  subject_term: string | null;
+  committee_id: number;
+  confidence: number;
+  source: string;
+  evidence_count: number;
+  bill_count: number;
+  first_seen_congress: number | null;
+  last_seen_congress: number | null;
+  last_seen_at: string | null;
+  is_manual_override: boolean;
+  is_suppressed: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PolicyAreaCommitteeMapInsert {
+  id?: number;
+  policy_area: string;
+  subject_term?: string | null;
+  committee_id: number;
+  confidence: number;
+  source: string;
+  evidence_count?: number;
+  bill_count?: number;
+  first_seen_congress?: number | null;
+  last_seen_congress?: number | null;
+  last_seen_at?: string | null;
+  is_manual_override?: boolean;
+  is_suppressed?: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface PolicyAreaCommitteeEvidenceRow {
+  id: number;
+  map_id: number;
+  evidence_type: string;
+  source_table: string;
+  source_row_id: string;
+  source_url: string | null;
+  weight: number | null;
+  note: string | null;
+  evidence_payload: Record<string, unknown>;
+  created_at: string;
+}
+
+interface PolicyAreaCommitteeEvidenceInsert {
+  id?: number;
+  map_id: number;
+  evidence_type: string;
+  source_table: string;
+  source_row_id: string;
+  source_url?: string | null;
+  weight?: number | null;
+  note?: string | null;
+  evidence_payload?: Record<string, unknown>;
+  created_at?: string;
+}
+
+interface PolicyAreaCommitteeOverridesRow {
+  id: number;
+  policy_area: string;
+  subject_term: string | null;
+  committee_id: number;
+  override_action: string;
+  confidence_delta: number | null;
+  reason: string | null;
+  source: string;
+  created_by: string | null;
+  is_active: boolean;
+  effective_start_date: string | null;
+  effective_end_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PolicyAreaCommitteeOverridesInsert {
+  id?: number;
+  policy_area: string;
+  subject_term?: string | null;
+  committee_id: number;
+  override_action: string;
+  confidence_delta?: number | null;
+  reason?: string | null;
+  source: string;
+  created_by?: string | null;
+  is_active?: boolean;
+  effective_start_date?: string | null;
+  effective_end_date?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 interface MemberCommitteeAssignmentsRow {
   id: number;
   bioguide_id: string;
   committee_code: string | null;
   committee_name: string;
   normalized_committee_name: string;
+  committee_key: string | null;
   chamber: string | null;
   congress: number | null;
   role: string | null;
@@ -734,6 +973,7 @@ interface MemberCommitteeAssignmentsInsert {
   committee_code?: string | null;
   committee_name: string;
   normalized_committee_name: string;
+  committee_key?: string | null;
   chamber?: string | null;
   congress?: number | null;
   role?: string | null;
