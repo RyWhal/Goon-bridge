@@ -154,7 +154,12 @@ Add a canonical committee table for top-level committees:
 
 Even though v1 only targets top-level committees, `is_subcommittee` and `parent_committee_id` should be present now so subcommittees can be added later without redesigning the model.
 
-The existing `member_committee_assignments` table should gain a nullable `committee_key` column in a follow-up migration, or the project should add a compatibility view that resolves `committee_key` from `committee_code` or normalized name. This avoids blocking joins when scraped assignments do not carry a stable committee code.
+The existing `member_committee_assignments` table should gain a nullable `committee_key` column in a follow-up migration and be backfilled using the same rule:
+
+- `committee_code` when present
+- otherwise `normalized_committee_name + ':' + chamber`
+
+Do not rely on a looser compatibility view that drops chamber from the fallback key. That would create avoidable collisions between House and Senate committees with similar names.
 
 ### Policy To Committee Mapping
 
@@ -192,6 +197,33 @@ Supported `evidence_type` values should include:
 - `jurisdiction_rule`
 - `manual_override`
 
+- `policy_area_committee_overrides`
+  - `id`
+  - `policy_area`
+  - `subject_term`
+  - `committee_id`
+  - `override_action`
+  - `confidence_delta`
+  - `reason`
+  - `source`
+  - `created_by`
+  - `created_at`
+  - `updated_at`
+
+Recommended `override_action` values:
+
+- `promote`
+- `suppress`
+- `pin`
+
+Override precedence for v1:
+
+- `pin` sets the final mapping confidence directly and forces inclusion
+- `promote` adds a bounded positive adjustment
+- `suppress` applies a bounded negative adjustment or exclusion
+
+This table is the source of truth for manual intervention. `is_manual_override` on the map row simply indicates that at least one active override affected the final score.
+
 For v1, `subject_term` should remain nullable and should not be required for the first derivation pass. The current bill cache already persists `policy_area` and committee names, but not subject terms. Subject-level mappings should therefore be deferred until a dedicated subject-term ingestion path exists.
 
 Recommended uniqueness constraints:
@@ -200,6 +232,8 @@ Recommended uniqueness constraints:
 - unique on `(policy_area, committee_id)` for rows where `subject_term is null`
 - unique on `(policy_area, subject_term, committee_id)` for rows where `subject_term is not null`
 - unique on `(map_id, evidence_type, source_table, source_row_id)` in `policy_area_committee_evidence`
+- unique on `(policy_area, committee_id)` in `policy_area_committee_overrides` for rows where `subject_term is null`
+- unique on `(policy_area, subject_term, committee_id)` in `policy_area_committee_overrides` for rows where `subject_term is not null`
 
 ### Organization Location Observation Dimension
 
@@ -310,7 +344,7 @@ There is likely no single official dataset that directly states "this policy are
 - Congress.gov bill metadata
   - policy area
   - committee referrals
-- official House and Senate committee jurisdiction material
+- manually curated jurisdiction seed snapshots sourced from official House and Senate committee jurisdiction material
 - manual overrides
 
 The bill metadata path is the primary source of observed legislative behavior. Jurisdiction text acts as a slower-moving seed and correction layer.
@@ -318,7 +352,15 @@ The bill metadata path is the primary source of observed legislative behavior. J
 For v1, the derivation must rely only on fields already available or explicitly planned for ingestion. That means:
 
 - required in v1: `policy_area`, committee referrals or committee names
+- required in v1: a versioned `committee_jurisdiction_seeds` table populated from manually curated snapshots of official jurisdiction text
 - deferred from v1: Congress.gov subject terms until they are stored in cache tables or a dedicated raw bill-subject table
+
+For v1, do not scrape official committee pages dynamically at runtime. Instead:
+
+- create a `committee_jurisdiction_seeds` table
+- load it from manually curated snapshots sourced from official House and Senate jurisdiction pages
+- version the seeds by Congress or effective date
+- refresh them only through an explicit admin workflow when the source material changes
 
 ### Organization Location To District Sources
 
@@ -356,8 +398,8 @@ The first release should use a transparent scoring model with three signal famil
 Recommended interpretation:
 
 - `bill_history`: strongest observed signal
-- `jurisdiction_rule`: slower-moving seed or support signal
-- `manual_override`: targeted promotion or suppression
+- `jurisdiction_rule`: slower-moving seed or support signal sourced from versioned jurisdiction snapshots
+- `manual_override`: targeted promotion, suppression, or pinning via `policy_area_committee_overrides`
 
 Example composition:
 
@@ -483,7 +525,7 @@ Recommended integration points:
 The implementation plan should also define:
 
 - how `member_committee_assignments` joins to `committees` through `committee_key`
-- whether a compatibility view or backfill migration is needed for existing committee assignment rows
+- the backfill migration that writes `committee_key` onto existing committee assignment rows
 - whether any public-facing derived views should be added with `security_invoker = true`
 
 The current relationship and correlation architecture already supports storing evidence payloads and assembling cases from durable facts. The mapping layer should become another structured input to that system.
@@ -562,7 +604,9 @@ Mitigation:
 ### Phase 1
 
 - add committee dimension
+- add `committee_jurisdiction_seeds` sourced from manually curated official snapshots
 - add policy-to-committee map and evidence tables
+- add manual override table for policy mappings
 - add organization location and location-to-district map and evidence tables
 - seed from Congress.gov-derived bill history and USAspending-derived locations
 - expose read APIs
@@ -582,10 +626,8 @@ Mitigation:
 
 ## Open Questions For Planning
 
-- whether committee jurisdiction seeds should be sourced from manually curated snapshots, official pages, or both
 - how much historical bill depth should be materialized before the first derivation run
 - whether manual overrides need an internal admin UI in the first implementation plan or can start as seed tables
-- whether `committee_key` should be backfilled directly into existing assignment tables or surfaced through a compatibility view first
 
 ## Recommendation
 
