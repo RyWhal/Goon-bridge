@@ -1,21 +1,13 @@
 import { Hono } from "hono";
-import type { Env } from "./types";
-import { corsMiddleware } from "./middleware/cors";
-import { securityHeaders } from "./middleware/security";
-import { rateLimitMiddleware } from "./middleware/rate-limit";
-import { congress } from "./apis/congress";
-import { openfec } from "./apis/openfec";
-import { finnhub } from "./apis/finnhub";
-import { usaspending } from "./apis/usaspending";
-import { weather } from "./apis/weather";
-import { earthquakes } from "./apis/earthquakes";
-import { sunrise } from "./apis/sunrise";
-import { lunar } from "./apis/lunar";
-import { correlation } from "./apis/correlation";
-import { disclosures } from "./apis/disclosures";
-import { lda } from "./apis/lda";
-import { getSupabase } from "./lib/supabase";
-import pkg from "../package.json";
+import type { Env } from "./types.ts";
+import { corsMiddleware } from "./middleware/cors.ts";
+import { securityHeaders } from "./middleware/security.ts";
+import { rateLimitMiddleware } from "./middleware/rate-limit.ts";
+import { correlation } from "./apis/correlation.ts";
+import { maps } from "./apis/maps.ts";
+import { getSupabase } from "./lib/supabase.ts";
+
+const API_VERSION = "0.1.0";
 
 const app = new Hono<Env>();
 
@@ -65,7 +57,7 @@ app.get("/api/health", async (c) => {
     timestamp: new Date().toISOString(),
     environment: c.env.ENVIRONMENT ?? "unknown",
       version: {
-      version: pkg.version,
+      version: API_VERSION,
       commit: c.env.CF_VERSION_METADATA?.tag ?? "unknown",
       deployed_at: c.env.CF_VERSION_METADATA?.timestamp ?? null,
       version_id: c.env.CF_VERSION_METADATA?.id ?? "unknown",
@@ -87,17 +79,53 @@ app.get("/api/health", async (c) => {
 });
 
 // ── Mount API routes ─────────────────────────────────────────────────────────
-app.route("/api/congress", congress);
-app.route("/api/fec", openfec);
-app.route("/api/finnhub", finnhub);
-app.route("/api/usaspending", usaspending);
-app.route("/api/weather", weather);
-app.route("/api/earthquakes", earthquakes);
-app.route("/api/sunrise", sunrise);
-app.route("/api/lunar", lunar);
+const endpointTestMode = (
+  globalThis as typeof globalThis & {
+    process?: {
+      env?: Record<string, string | undefined>;
+    };
+  }
+).process?.env?.GOON_BRIDGE_ENDPOINT_TEST === "1";
+
+if (!endpointTestMode) {
+  const [
+    { congress },
+    { openfec },
+    { finnhub },
+    { usaspending },
+    { weather },
+    { earthquakes },
+    { sunrise },
+    { lunar },
+    { disclosures },
+    { lda },
+  ] = await Promise.all([
+    import("./apis/congress.ts"),
+    import("./apis/openfec.ts"),
+    import("./apis/finnhub.ts"),
+    import("./apis/usaspending.ts"),
+    import("./apis/weather.ts"),
+    import("./apis/earthquakes.ts"),
+    import("./apis/sunrise.ts"),
+    import("./apis/lunar.ts"),
+    import("./apis/disclosures.ts"),
+    import("./apis/lda.ts"),
+  ]);
+
+  app.route("/api/congress", congress);
+  app.route("/api/fec", openfec);
+  app.route("/api/finnhub", finnhub);
+  app.route("/api/usaspending", usaspending);
+  app.route("/api/weather", weather);
+  app.route("/api/earthquakes", earthquakes);
+  app.route("/api/sunrise", sunrise);
+  app.route("/api/lunar", lunar);
+  app.route("/api/disclosures", disclosures);
+  app.route("/api/lda", lda);
+}
+
 app.route("/api/correlation", correlation);
-app.route("/api/disclosures", disclosures);
-app.route("/api/lda", lda);
+app.route("/api/maps", maps);
 
 // ── Vote context (aggregated) ────────────────────────────────────────────────
 // Returns all correlation data for a given date in a single response
