@@ -154,6 +154,19 @@ Add a canonical committee table for top-level committees:
 
 Even though v1 only targets top-level committees, `is_subcommittee` and `parent_committee_id` should be present now so subcommittees can be added later without redesigning the model.
 
+The authoritative v1 committee source should be:
+
+- current official committee-assignment data already used by the project
+- plus a curated seed list for any top-level committees missing from assignment-derived refreshes
+
+Committee normalization rules for v1:
+
+- normalize source committee strings by uppercasing, stripping punctuation, and collapsing whitespace
+- strip chamber boilerplate and role suffixes
+- map known aliases through a curated committee alias seed table
+- if a source string refers to a subcommittee, collapse it to the parent top-level committee before deriving `policy_area -> committee`
+- if a source string cannot be matched to a canonical top-level committee, write it to a review queue table and do not silently infer a fallback key
+
 The existing `member_committee_assignments` table should gain a nullable `committee_key` column in a follow-up migration and be backfilled using the same rule:
 
 - `committee_code` when present
@@ -182,6 +195,7 @@ If an existing committee-assignment row has a null chamber, the backfill should:
   - `last_seen_congress`
   - `last_seen_at`
   - `is_manual_override`
+  - `is_suppressed`
   - `created_at`
   - `updated_at`
 
@@ -229,7 +243,7 @@ Override precedence for v1:
 
 - `pin` sets the final mapping confidence directly and forces inclusion
 - `promote` adds a bounded positive adjustment
-- `suppress` applies a bounded negative adjustment or exclusion
+- `suppress` preserves the mapping row but sets `confidence = 0` and marks the row suppressed
 
 This table is the source of truth for manual intervention. `is_manual_override` on the map row simply indicates that at least one active override affected the final score.
 
@@ -240,6 +254,12 @@ Override reconciliation rules:
 - when multiple historical overrides exist for the same key, the newest active override wins
 - the implementation should enforce at most one active override per `(policy_area, committee_id)` when `subject_term is null`
 - the implementation should enforce at most one active override per `(policy_area, subject_term, committee_id)` when `subject_term is not null`
+
+Override visibility rules for v1:
+
+- `pin`: mapping row remains, `confidence = 1.0`, `is_suppressed = false`, always visible in default reads
+- `promote`: mapping row remains, confidence increases within the allowed cap, visible according to normal thresholds
+- `suppress`: mapping row remains for traceability, `confidence = 0`, `is_suppressed = true`, hidden from default reads and narrative outputs
 
 For v1, `subject_term` should remain nullable and should not be required for the first derivation pass. The current bill cache already persists `policy_area` and committee names, but not subject terms. Subject-level mappings should therefore be deferred until a dedicated subject-term ingestion path exists.
 
@@ -378,6 +398,29 @@ For v1, do not scrape official committee pages dynamically at runtime. Instead:
 - load it from manually curated snapshots sourced from official House and Senate jurisdiction pages
 - version the seeds by Congress or effective date
 - refresh them only through an explicit admin workflow when the source material changes
+
+Define the table as:
+
+- `committee_jurisdiction_seeds`
+  - `id`
+  - `committee_key`
+  - `committee_id`
+  - `congress`
+  - `source_version`
+  - `source_url`
+  - `jurisdiction_text`
+  - `jurisdiction_summary`
+  - `effective_start_date`
+  - `effective_end_date`
+  - `created_at`
+  - `updated_at`
+
+Versioning and joins:
+
+- unique key on `(committee_key, congress, source_version)`
+- `committee_key` is the required logical join key
+- `committee_id` is an optional denormalized FK that should be populated when the canonical committee row already exists
+- seeds should be versioned by Congress and `source_version`; `effective_*` dates are supplementary metadata, not the primary uniqueness grain
 
 ### Organization Location To District Sources
 
