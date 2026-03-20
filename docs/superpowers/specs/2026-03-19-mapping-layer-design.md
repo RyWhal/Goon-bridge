@@ -161,6 +161,12 @@ The existing `member_committee_assignments` table should gain a nullable `commit
 
 Do not rely on a looser compatibility view that drops chamber from the fallback key. That would create avoidable collisions between House and Senate committees with similar names.
 
+If an existing committee-assignment row has a null chamber, the backfill should:
+
+- first attempt chamber normalization from the member record or source payload
+- if chamber still cannot be determined, leave `committee_key` null
+- exclude that row from joins that require canonical committee identity until repaired
+
 ### Policy To Committee Mapping
 
 - `policy_area_committee_map`
@@ -207,6 +213,9 @@ Supported `evidence_type` values should include:
   - `reason`
   - `source`
   - `created_by`
+  - `is_active`
+  - `effective_start_date`
+  - `effective_end_date`
   - `created_at`
   - `updated_at`
 
@@ -223,6 +232,14 @@ Override precedence for v1:
 - `suppress` applies a bounded negative adjustment or exclusion
 
 This table is the source of truth for manual intervention. `is_manual_override` on the map row simply indicates that at least one active override affected the final score.
+
+Override reconciliation rules:
+
+- only active overrides participate in scoring
+- active means `is_active = true` and the current date is within the effective date window when one is present
+- when multiple historical overrides exist for the same key, the newest active override wins
+- the implementation should enforce at most one active override per `(policy_area, committee_id)` when `subject_term is null`
+- the implementation should enforce at most one active override per `(policy_area, subject_term, committee_id)` when `subject_term is not null`
 
 For v1, `subject_term` should remain nullable and should not be required for the first derivation pass. The current bill cache already persists `policy_area` and committee names, but not subject terms. Subject-level mappings should therefore be deferred until a dedicated subject-term ingestion path exists.
 
@@ -378,6 +395,32 @@ Recommendation for the canonical resolver in v1:
 
 - use one official Census-aligned district lookup source for the same Congress the app is targeting
 - persist the resolved `congress` on the mapping row so future redistricting does not silently rewrite history
+
+Persist the resolver reference material in:
+
+- `district_lookup_reference`
+  - `id`
+  - `congress`
+  - `lookup_key`
+  - `lookup_type`
+  - `state`
+  - `district`
+  - `resolution_method`
+  - `source`
+  - `source_version`
+  - `effective_start_date`
+  - `effective_end_date`
+  - `created_at`
+  - `updated_at`
+
+Recommended `lookup_type` values:
+
+- `address`
+- `zip`
+- `county`
+- `lat_lon`
+
+`district_lookup_reference` should be versioned by Congress and source version. `lookup_key` should be a deterministic normalized key appropriate for the lookup type, such as normalized ZIP, county FIPS, or geocode bucket key. The derivation layer should always record both the resolved district and the resolver version used.
 
 Deferred but planned later:
 
