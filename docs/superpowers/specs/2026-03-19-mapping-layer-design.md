@@ -6,8 +6,8 @@ Add a relational-first mapping layer that supports transparent, inspectable "int
 
 The first release covers two derived mapping systems:
 
-- `policy area / subject -> top-level committee`
-- `company operating location -> congressional district`
+- `policy area -> top-level committee`
+- `organization location observation -> congressional district`
 
 Both systems should follow the same pattern:
 
@@ -19,7 +19,7 @@ Both systems should follow the same pattern:
 The purpose is not to prove causality or deliver research-grade classification. The purpose is to let the app show legible chains such as:
 
 - `bill -> policy area -> committee -> members`
-- `company -> site -> district -> member`
+- `company -> location observation -> district -> member`
 
 with enough structured evidence that a user can inspect why each hop exists.
 
@@ -38,6 +38,7 @@ with enough structured evidence that a user can inspect why each hop exists.
 - Performing semantic bill-text classification in the first release.
 - Requiring SEC properties scraping for launch.
 - Making causality, intent, or ethical judgments about the relationships being shown.
+- Treating every v1 organization location as a verified operating facility rather than an observed location claim from a source record.
 
 ## Product Framing
 
@@ -69,7 +70,7 @@ The new mapping layer should extend that pattern rather than creating a separate
 
 ### Option 1: Domain-Specific Mapping Tables Only
 
-Create dedicated map tables for each domain, such as `policy_area_committee_map` and `organization_site_district_map`, with separate evidence handling for each pipeline.
+Create dedicated map tables for each domain, such as `policy_area_committee_map` and `organization_location_district_map`, with separate evidence handling for each pipeline.
 
 Pros:
 
@@ -135,6 +136,7 @@ Add a canonical committee table for top-level committees:
 
 - `committees`
   - `id`
+  - `committee_key`
   - `committee_code`
   - `name`
   - `normalized_name`
@@ -145,7 +147,14 @@ Add a canonical committee table for top-level committees:
   - `created_at`
   - `updated_at`
 
+`committee_key` should be the canonical join key for the project and must be unique. In v1, define it as:
+
+- `committee_code` when present
+- otherwise `normalized_name + ':' + chamber`
+
 Even though v1 only targets top-level committees, `is_subcommittee` and `parent_committee_id` should be present now so subcommittees can be added later without redesigning the model.
+
+The existing `member_committee_assignments` table should gain a nullable `committee_key` column in a follow-up migration, or the project should add a compatibility view that resolves `committee_key` from `committee_code` or normalized name. This avoids blocking joins when scraped assignments do not carry a stable committee code.
 
 ### Policy To Committee Mapping
 
@@ -157,7 +166,9 @@ Even though v1 only targets top-level committees, `is_subcommittee` and `parent_
   - `confidence`
   - `source`
   - `evidence_count`
-  - `first_seen_bill_count`
+  - `bill_count`
+  - `first_seen_congress`
+  - `last_seen_congress`
   - `last_seen_at`
   - `is_manual_override`
   - `created_at`
@@ -181,37 +192,53 @@ Supported `evidence_type` values should include:
 - `jurisdiction_rule`
 - `manual_override`
 
-### Organization Site Dimension
+For v1, `subject_term` should remain nullable and should not be required for the first derivation pass. The current bill cache already persists `policy_area` and committee names, but not subject terms. Subject-level mappings should therefore be deferred until a dedicated subject-term ingestion path exists.
 
-- `organization_sites`
+Recommended uniqueness constraints:
+
+- unique on `committee_key` in `committees`
+- unique on `(policy_area, committee_id)` for rows where `subject_term is null`
+- unique on `(policy_area, subject_term, committee_id)` for rows where `subject_term is not null`
+- unique on `(map_id, evidence_type, source_table, source_row_id)` in `policy_area_committee_evidence`
+
+### Organization Location Observation Dimension
+
+- `organization_locations`
   - `id`
   - `organization_id`
-  - `site_name`
+  - `location_name`
   - `address1`
   - `city`
   - `state`
   - `zip`
   - `latitude`
   - `longitude`
-  - `site_type`
+  - `location_kind`
+  - `location_fingerprint`
   - `source`
   - `source_row_id`
   - `confidence`
+  - `source_congress`
   - `created_at`
   - `updated_at`
 
-Recommended `site_type` values:
+Recommended `location_kind` values:
 
 - `performance`
 - `facility`
 - `hq`
 - `office`
 
-### Site To District Mapping
+`organization_locations` is intentionally broader than a strict operating-sites table. In v1, most rows will be observed location claims derived from source records such as USAspending place-of-performance data. Later releases can add stronger operating-facility sources without redesigning the model.
 
-- `organization_site_district_map`
+`location_fingerprint` should be a deterministic normalized key derived from the best available address parts, such as normalized `address1 + city + state + zip`, or `city + state + zip` when only partial location data exists.
+
+### Location To District Mapping
+
+- `organization_location_district_map`
   - `id`
-  - `organization_site_id`
+  - `organization_location_id`
+  - `congress`
   - `state`
   - `district`
   - `confidence`
@@ -220,7 +247,7 @@ Recommended `site_type` values:
   - `created_at`
   - `updated_at`
 
-- `organization_site_district_evidence`
+- `organization_location_district_evidence`
   - `id`
   - `map_id`
   - `source_table`
@@ -237,6 +264,13 @@ Recommended `resolution_method` values:
 - `address_geocode`
 - `zip_centroid`
 - `county_crosswalk`
+
+Recommended uniqueness constraints:
+
+- unique on `(source, source_row_id)` in `organization_locations`
+- non-unique index on `(organization_id, location_fingerprint)`
+- unique on `(organization_location_id, congress)` in `organization_location_district_map`
+- unique on `(map_id, source_table, source_row_id)` in `organization_location_district_evidence`
 
 ## Shared Evidence Pattern
 
@@ -257,7 +291,7 @@ The evidence payload should store the raw context needed to explain the link, su
 - bill identifiers and counts
 - committee jurisdiction excerpts
 - matching subject terms
-- original site location values
+- original location values
 - geocoding or district lookup metadata
 
 The evidence table shape can vary by domain, but the semantics should remain consistent:
@@ -275,14 +309,18 @@ There is likely no single official dataset that directly states "this policy are
 
 - Congress.gov bill metadata
   - policy area
-  - subject terms
   - committee referrals
 - official House and Senate committee jurisdiction material
 - manual overrides
 
 The bill metadata path is the primary source of observed legislative behavior. Jurisdiction text acts as a slower-moving seed and correction layer.
 
-### Company Location To District Sources
+For v1, the derivation must rely only on fields already available or explicitly planned for ingestion. That means:
+
+- required in v1: `policy_area`, committee referrals or committee names
+- deferred from v1: Congress.gov subject terms until they are stored in cache tables or a dedicated raw bill-subject table
+
+### Organization Location To District Sources
 
 The first release should prioritize sources that are stable and easy to operationalize:
 
@@ -292,7 +330,12 @@ The first release should prioritize sources that are stable and easy to operatio
   - place of performance state
   - place of performance ZIP
   - performance congressional district when directly available
-- district lookup or crosswalk data used to resolve address, ZIP, or county to congressional district
+- one canonical congressional district resolver aligned to the congressional cycle being analyzed
+
+Recommendation for the canonical resolver in v1:
+
+- use one official Census-aligned district lookup source for the same Congress the app is targeting
+- persist the resolved `congress` on the mapping row so future redistricting does not silently rewrite history
 
 Deferred but planned later:
 
@@ -333,12 +376,11 @@ Suggested confidence bands:
 
 #### Bill-History Rules
 
-When deriving `policy area / subject -> committee` from bills:
+When deriving `policy area -> committee` from bills:
 
 - count co-occurrence frequency across historical bills
 - weight primary or explicit referrals more strongly than weaker committee associations
 - down-rank rare one-off matches
-- preserve subject-term level evidence, not just top-level policy-area counts
 
 This keeps the mapping grounded in observed legislative traffic.
 
@@ -352,7 +394,7 @@ Jurisdiction-derived support should come from official House and Senate rule tex
 
 Jurisdiction support should not fully replace bill history, because the product benefits from showing what committees actually receive bills in practice.
 
-### Company Site To District Scoring
+### Organization Location To District Scoring
 
 This mapping should use a source-first hierarchy:
 
@@ -369,7 +411,7 @@ Example interpretations:
 
 This should produce user-facing explanations such as:
 
-> Mapped Fort Worth, Texas site to TX-12 using ZIP-based district lookup from USAspending performance location.
+> Mapped Fort Worth, Texas location to TX-12 using ZIP-based district lookup from USAspending performance location.
 
 The important property is transparency, not false precision.
 
@@ -383,7 +425,7 @@ Recommended first-pass jobs:
 
 - refresh committee dimension and jurisdiction seeds
 - refresh historical bill metadata required for policy mappings
-- refresh organization site candidates from USAspending-derived location data
+- refresh organization location candidates from USAspending-derived location data
 - refresh district lookup material needed for site resolution
 
 ### Derivation
@@ -397,6 +439,14 @@ Separate derivation jobs should:
 
 Derivations should be rerunnable and idempotent. A failed derivation should not corrupt raw source facts.
 
+Idempotency depends on deterministic keys:
+
+- committee rows keyed by `committee_key`
+- policy map rows keyed by `policy_area + committee_id`, or `policy_area + subject_term + committee_id` when subject terms exist
+- organization location rows keyed by `source + source_row_id`
+- district map rows keyed by `organization_location_id + congress`
+- evidence rows keyed by parent map id plus source identity
+
 ### Read Path
 
 Read-oriented APIs should return derived links plus compact evidence trails. Suggested endpoints:
@@ -407,6 +457,19 @@ Read-oriented APIs should return derived links plus compact evidence trails. Sug
 
 These endpoints should support the existing frontend model where the UI presents a result and lets the user expand into the supporting chain.
 
+## Access Control
+
+New tables should follow the same broad security posture as the current relationship layer:
+
+- service-role write access for ingestion and derivation jobs
+- public read only through curated API responses or explicitly approved derived views
+
+Recommendation:
+
+- keep raw source tables service-only
+- expose derived reads through Worker endpoints first
+- only add direct public-read Supabase views if the frontend later needs them
+
 ## Integration With Existing App
 
 This work should extend the current Supabase-backed relationship layer rather than introducing a separate subsystem.
@@ -416,6 +479,12 @@ Recommended integration points:
 - keep raw facts and derived mappings in Supabase migrations alongside the current relationship schema
 - add admin refresh routes under the existing correlation/admin pipeline
 - use derived map tables to enrich correlation cases and future narrative summaries
+
+The implementation plan should also define:
+
+- how `member_committee_assignments` joins to `committees` through `committee_key`
+- whether a compatibility view or backfill migration is needed for existing committee assignment rows
+- whether any public-facing derived views should be added with `security_invoker = true`
 
 The current relationship and correlation architecture already supports storing evidence payloads and assembling cases from durable facts. The mapping layer should become another structured input to that system.
 
@@ -494,7 +563,7 @@ Mitigation:
 
 - add committee dimension
 - add policy-to-committee map and evidence tables
-- add organization site and site-to-district map and evidence tables
+- add organization location and location-to-district map and evidence tables
 - seed from Congress.gov-derived bill history and USAspending-derived locations
 - expose read APIs
 
@@ -502,7 +571,8 @@ Mitigation:
 
 - add manual override workflows
 - improve jurisdiction seed coverage
-- enrich organization sites with SEC and other facility sources
+- add explicit subject-term ingestion and subject-level mappings
+- enrich organization locations with SEC and other facility sources
 - expand narrative outputs to use the new mappings more aggressively
 
 ### Phase 3
@@ -512,10 +582,10 @@ Mitigation:
 
 ## Open Questions For Planning
 
-- what existing congressional district dataset or lookup strategy should be the canonical resolver in v1
 - whether committee jurisdiction seeds should be sourced from manually curated snapshots, official pages, or both
 - how much historical bill depth should be materialized before the first derivation run
 - whether manual overrides need an internal admin UI in the first implementation plan or can start as seed tables
+- whether `committee_key` should be backfilled directly into existing assignment tables or surfaced through a compatibility view first
 
 ## Recommendation
 
@@ -523,8 +593,8 @@ Build the mapping layer as a relational source of truth with dedicated domain ma
 
 For v1:
 
-- map `policy area / subject -> top-level committee`
-- map `organization site -> congressional district`
+- map `policy area -> top-level committee`
+- map `organization location observation -> congressional district`
 - keep every link traceable
 - feed the results into the existing correlation and narrative system
 
