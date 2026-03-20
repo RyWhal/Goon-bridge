@@ -131,6 +131,7 @@ export function applyPolicyCommitteeOverride<T extends PolicyCommitteeMapRow>(
 
 const POLICY_COMMITTEE_MAP_SOURCE = "bill_history";
 const POLICY_COMMITTEE_REVIEW_SOURCE = "bill_committee_name";
+const POLICY_COMMITTEE_SEED_SOURCE = "bill_committee_name";
 
 function asCommitteeNameArray(value: string[] | null | undefined): string[] {
   return Array.isArray(value)
@@ -151,6 +152,19 @@ function normalizeReviewSourceValue(value: string, chamberHint: string | null): 
     normalizedSourceValue: collapsed.normalizedName || normalizeCommitteeLabel(value),
     chamber: collapsed.chamber,
   };
+}
+
+function buildSeedCommitteeKey(normalizedName: string, chamber: string | null): string {
+  return chamber ? `${normalizedName}:${chamber}` : `${normalizedName}:Unknown`;
+}
+
+function toCommitteeDisplayName(normalizedName: string): string {
+  return normalizedName
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function buildReviewQueueKey(
@@ -332,17 +346,33 @@ export function derivePolicyCommitteeMappings({
 }
 
 async function loadPolicyCommitteeBills(sb: DbClient, congress: number): Promise<BillRow[]> {
-  const { data, error } = await sb
-    .from("bills")
-    .select("id,congress,policy_area,committee_names")
-    .eq("congress", congress)
-    .order("id", { ascending: true });
+  const pageSize = 1000;
+  const rows: BillRow[] = [];
+  let start = 0;
 
-  if (error) {
-    throw new Error(`Failed to load bills for policy committee refresh: ${error.message}`);
+  while (true) {
+    const { data, error } = await sb
+      .from("bills")
+      .select("id,congress,policy_area,committee_names")
+      .eq("congress", congress)
+      .range(start, start + pageSize - 1)
+      .order("id", { ascending: true });
+
+    if (error) {
+      throw new Error(`Failed to load bills for policy committee refresh: ${error.message}`);
+    }
+
+    const batch = (data ?? []) as BillRow[];
+    rows.push(...batch);
+
+    if (batch.length < pageSize) {
+      break;
+    }
+
+    start += pageSize;
   }
 
-  return (data ?? []) as BillRow[];
+  return rows;
 }
 
 async function loadPolicyCommitteeCommittees(sb: DbClient): Promise<CommitteeRow[]> {
@@ -356,6 +386,61 @@ async function loadPolicyCommitteeCommittees(sb: DbClient): Promise<CommitteeRow
   }
 
   return (data ?? []) as CommitteeRow[];
+}
+
+async function seedPolicyCommitteesFromBills(sb: DbClient, bills: PolicyCommitteeBillInput[]): Promise<number> {
+  const seedRows = new Map<
+    string,
+    {
+      row: Database["public"]["Tables"]["committees"]["Insert"];
+      billIds: Set<number>;
+    }
+  >();
+
+  for (const bill of bills) {
+    for (const committeeName of asCommitteeNameArray(bill.committee_names)) {
+      const chamberHint = detectChamberHint(committeeName);
+      const normalized = normalizeReviewSourceValue(committeeName, chamberHint);
+      if (!normalized.normalizedSourceValue) continue;
+
+      const committeeKey = buildSeedCommitteeKey(normalized.normalizedSourceValue, normalized.chamber);
+      const existing = seedRows.get(committeeKey);
+
+      if (existing) {
+        existing.billIds.add(bill.id);
+        continue;
+      }
+
+      seedRows.set(committeeKey, {
+        row: {
+          committee_key: committeeKey,
+          committee_code: null,
+          name: toCommitteeDisplayName(normalized.normalizedSourceValue),
+          normalized_name: normalized.normalizedSourceValue,
+          chamber: normalized.chamber,
+          is_subcommittee: false,
+          parent_committee_id: null,
+          source: POLICY_COMMITTEE_SEED_SOURCE,
+        },
+        billIds: new Set([bill.id]),
+      });
+    }
+  }
+
+  const rows = [...seedRows.values()]
+    .filter((entry) => entry.billIds.size >= 2)
+    .map((entry) => entry.row);
+  if (!rows.length) return 0;
+
+  const { error } = await sb.from("committees").upsert(rows, {
+    onConflict: "committee_key",
+  });
+
+  if (error) {
+    throw new Error(`Failed to seed policy committees from bills: ${error.message}`);
+  }
+
+  return rows.length;
 }
 
 async function loadExistingPolicyCommitteeMaps(sb: DbClient) {
@@ -427,15 +512,52 @@ async function replacePolicyCommitteeMappings(
     return [];
   }
 
-  const { data, error } = await sb.from("policy_area_committee_map").upsert(rows, {
+  const upsertResponse = await sb.from("policy_area_committee_map").upsert(rows, {
     onConflict: "policy_area,committee_id",
   }).select("id,policy_area,committee_id");
 
-  if (error) {
-    throw new Error(`Failed to upsert policy committee map rows: ${error.message}`);
+  let currentRows = (upsertResponse.data ?? []) as Array<{ id: number; policy_area: string; committee_id: number }>;
+
+  if (upsertResponse.error) {
+    if (!/no unique or exclusion constraint/i.test(upsertResponse.error.message)) {
+      throw new Error(`Failed to upsert policy committee map rows: ${upsertResponse.error.message}`);
+    }
+
+    const existingByKey = new Map(existingRows.map((row) => [buildPolicyCommitteeMapKey(row), row] as const));
+    currentRows = [];
+
+    for (const row of rows) {
+      const existing = existingByKey.get(buildPolicyCommitteeMapKey(row as { policy_area: string; committee_id: number }));
+      if (existing) {
+        const { data, error } = await sb
+          .from("policy_area_committee_map")
+          .update(row)
+          .eq("id", existing.id)
+          .select("id,policy_area,committee_id")
+          .single();
+
+        if (error) {
+          throw new Error(`Failed to update policy committee map row ${existing.id}: ${error.message}`);
+        }
+
+        currentRows.push(data as { id: number; policy_area: string; committee_id: number });
+        continue;
+      }
+
+      const { data, error } = await sb
+        .from("policy_area_committee_map")
+        .insert([row])
+        .select("id,policy_area,committee_id")
+        .single();
+
+      if (error) {
+        throw new Error(`Failed to insert policy committee map row: ${error.message}`);
+      }
+
+      currentRows.push(data as { id: number; policy_area: string; committee_id: number });
+    }
   }
 
-  const currentRows = (data ?? []) as Array<{ id: number; policy_area: string; committee_id: number }>;
   const currentRowIds = new Set(currentRows.map((row) => row.id));
 
   for (const row of existingRows) {
@@ -548,10 +670,17 @@ async function replacePolicyCommitteeReviewQueue(
 }
 
 export async function refreshPolicyCommitteeMappings(sb: DbClient, congress: number) {
-  const [bills, committees] = await Promise.all([
-    loadPolicyCommitteeBills(sb, congress),
-    loadPolicyCommitteeCommittees(sb),
-  ]);
+  const bills = await loadPolicyCommitteeBills(sb, congress);
+  await seedPolicyCommitteesFromBills(
+    sb,
+    bills.map((bill) => ({
+      id: bill.id,
+      congress: bill.congress,
+      policy_area: bill.policy_area,
+      committee_names: bill.committee_names,
+    }))
+  );
+  const committees = await loadPolicyCommitteeCommittees(sb);
 
   const derived = collectPolicyCommitteeBillGroups({
     bills: bills.map((bill) => ({
@@ -676,6 +805,34 @@ function normalizePolicyAreaLabel(value: string): string {
   return value.trim().replace(/\s+/g, " ").toUpperCase();
 }
 
+function toPolicyAreaTitleCase(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function resolvePolicyAreaCandidates(value: string): string[] {
+  const trimmed = value.trim().replace(/\s+/g, " ");
+  const normalized = normalizePolicyAreaLabel(trimmed);
+  const candidates = new Set([trimmed, normalized, toPolicyAreaTitleCase(trimmed)]);
+
+  if (
+    normalized.includes("DEFENSE") ||
+    normalized.includes("NATIONAL SECURITY") ||
+    normalized.includes("ARMED FORCES")
+  ) {
+    candidates.add("Armed Forces and National Security");
+    candidates.add("ARMED FORCES AND NATIONAL SECURITY");
+  }
+
+  return [...candidates];
+}
+
 async function loadPolicyCommitteeCommitteeSummaries(
   sb: DbClient,
   committeeIds: number[]
@@ -711,14 +868,17 @@ export async function loadVisiblePolicyCommitteeMappings(
   sb: DbClient,
   policyArea: string
 ): Promise<PolicyCommitteeMapReadRow[]> {
-  const normalizedPolicyArea = normalizePolicyAreaLabel(policyArea);
-  const { data, error } = await sb
+  const policyAreaCandidates = resolvePolicyAreaCandidates(policyArea);
+  const query = sb
     .from("policy_area_committee_map")
     .select("id,policy_area,committee_id,confidence,source,evidence_count,bill_count,first_seen_congress,last_seen_congress,last_seen_at,is_manual_override,is_suppressed,created_at,updated_at")
-    .eq("policy_area", normalizedPolicyArea)
     .eq("is_suppressed", false)
     .order("confidence", { ascending: false })
     .order("id", { ascending: true });
+
+  const { data, error } = policyAreaCandidates.length === 1
+    ? await query.eq("policy_area", policyAreaCandidates[0])
+    : await query.in("policy_area", policyAreaCandidates);
 
   if (error) {
     throw new Error(`Failed to load policy committee mappings: ${error.message}`);

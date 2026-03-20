@@ -114,6 +114,9 @@ function createRefreshHarness(initial?: {
         filters.push({ column, value });
         return query;
       },
+      range() {
+        return query;
+      },
       order() {
         return makePromise({ data: resolve(), error: null });
       },
@@ -166,6 +169,29 @@ function createRefreshHarness(initial?: {
         },
         upsert(rows: Array<Record<string, unknown>>) {
           operations.push(`${table}.upsert:${rows.length}`);
+          if (table === "committees") {
+            for (const row of rows) {
+              const existing = state.committees.find(
+                (existingRow) => existingRow.committee_key === row.committee_key
+              );
+              if (existing) {
+                Object.assign(existing, row);
+                continue;
+              }
+
+              state.committees.push({
+                id: nextId++,
+                committee_key: row.committee_key as string,
+                committee_code: (row.committee_code as string | null | undefined) ?? null,
+                name: row.name as string,
+                normalized_name: row.normalized_name as string,
+                chamber: (row.chamber as string | null | undefined) ?? null,
+              });
+            }
+
+            return makePromise({ data: null, error: null });
+          }
+
           if (table === "policy_area_committee_map") {
             const currentRows = rows.map((row) => {
               const key = `${row.policy_area as string}|${row.committee_id as number}`;
@@ -415,14 +441,14 @@ test("derivePolicyCommitteeMappings groups bills by policy area and canonical co
     {
       source_type: "bill_committee_name",
       source_value: "Unknown Special Committee",
-      normalized_source_value: "UNKNOWN SPECIAL COMMITTEE",
+      normalized_source_value: "UNKNOWN SPECIAL",
       chamber: null,
       review_status: "pending",
     },
     {
       source_type: "bill_committee_name",
       source_value: "unknown special committee",
-      normalized_source_value: "UNKNOWN SPECIAL COMMITTEE",
+      normalized_source_value: "UNKNOWN SPECIAL",
       chamber: null,
       review_status: "pending",
     },
@@ -533,16 +559,16 @@ test("refreshPolicyCommitteeMappings writes derived rows before pruning stale on
     })),
     [
       {
-        id: 502,
+        id: 504,
         source_value: "Unknown Special Committee",
-        normalized_source_value: "UNKNOWN SPECIAL COMMITTEE",
+        normalized_source_value: "UNKNOWN SPECIAL",
         review_status: "pending",
         updated_at: true,
       },
       {
-        id: 504,
+        id: 505,
         source_value: "unknown special committee",
-        normalized_source_value: "UNKNOWN SPECIAL COMMITTEE",
+        normalized_source_value: "UNKNOWN SPECIAL",
         review_status: "pending",
         updated_at: true,
       },
@@ -558,6 +584,48 @@ test("refreshPolicyCommitteeMappings writes derived rows before pruning stale on
   assert.ok(queueInsertIndex >= 0);
   assert.ok(mapDeleteIndex > mapUpsertIndex);
   assert.ok(queueDeleteIndex > queueInsertIndex);
+});
+
+test("refreshPolicyCommitteeMappings seeds committees from bill committee names when the committee catalog is empty", async () => {
+  const harness = createRefreshHarness({
+    bills: [
+      {
+        id: 901,
+        congress: 119,
+        policy_area: "Armed Forces and National Security",
+        committee_names: ["Veterans' Affairs Committee"],
+      },
+      {
+        id: 902,
+        congress: 119,
+        policy_area: "Armed Forces and National Security",
+        committee_names: ["Veterans Affairs Committee"],
+      },
+    ],
+    committees: [],
+  });
+
+  const result = await refreshPolicyCommitteeMappings(harness as never, 119);
+
+  assert.equal(result.committeesLoaded, 1);
+  assert.equal(result.mappingsWritten, 1);
+  assert.equal(result.evidenceRowsWritten, 2);
+
+  assert.deepEqual(harness.state.committees, [
+    {
+      id: 1,
+      committee_key: "VETERANS AFFAIRS:Unknown",
+      committee_code: null,
+      name: "Veterans Affairs",
+      normalized_name: "VETERANS AFFAIRS",
+      chamber: null,
+    },
+  ]);
+
+  assert.deepEqual(
+    harness.state.maps.map(({ policy_area, source }) => ({ policy_area, source })),
+    [{ policy_area: "Armed Forces and National Security", source: "bill_history" }]
+  );
 });
 
 test("refreshPolicyCommitteeMappings removes duplicate review queue rows deterministically", async () => {
@@ -614,7 +682,7 @@ test("refreshPolicyCommitteeMappings removes duplicate review queue rows determi
     harness.state.reviewQueue.map(({ id, source_value }) => ({ id, source_value })),
     [
       {
-        id: 901,
+        id: 904,
         source_value: "Unknown Special Committee",
       },
     ]

@@ -76,7 +76,9 @@ export function normalizeCommitteeLabel(value: string): string {
     .trim();
 
   if (!cleaned) return "";
-  return stripBoilerplate(cleaned);
+  return stripBoilerplate(cleaned)
+    .replace(/\s+COMMITTEE$/g, "")
+    .trim();
 }
 
 export function buildCommitteeKey({ committeeCode, normalizedName, chamber }: CommitteeKeyInput): string | null {

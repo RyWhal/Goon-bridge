@@ -24,7 +24,7 @@ maps.get("/policy-committees", async (c) => {
     const rows = await loadVisiblePolicyCommitteeMappings(sb, policyArea);
     return c.json(
       {
-        policy_area: policyArea.trim().replace(/\s+/g, " ").toUpperCase(),
+        policy_area: rows[0]?.policy_area ?? policyArea.trim().replace(/\s+/g, " ").toUpperCase(),
         count: rows.length,
         rows,
       },

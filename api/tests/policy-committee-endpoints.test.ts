@@ -159,6 +159,9 @@ function createRefreshHarness(initial?: {
         filters.push({ column, value });
         return query;
       },
+      range() {
+        return query;
+      },
       order() {
         return makePromise({ data: resolve(), error: null });
       },
@@ -397,6 +400,82 @@ test("GET /api/maps/policy-committees returns 400 when policyArea is missing", a
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), {
     error: "Missing required query parameter 'policyArea'",
+  });
+});
+
+test("GET /api/maps/policy-committees resolves defense shorthand to armed forces and national security", async (t) => {
+  mock.method(
+    globalThis,
+    "fetch",
+    buildSupabaseFetchStub({
+      committees: [
+        {
+          id: 1,
+          committee_key: "ARMED SERVICES:Unknown",
+          committee_code: null,
+          name: "Armed Services",
+          normalized_name: "ARMED SERVICES",
+          chamber: null,
+        },
+      ],
+      policyAreaCommitteeMaps: [
+        {
+          id: 21,
+          policy_area: "Armed Forces and National Security",
+          committee_id: 1,
+          confidence: 0.7,
+          source: "bill_history",
+          evidence_count: 4,
+          bill_count: 4,
+          first_seen_congress: 119,
+          last_seen_congress: 119,
+          last_seen_at: "2026-03-20T00:00:00.000Z",
+          is_manual_override: false,
+          is_suppressed: false,
+          created_at: "2026-03-20T00:00:00.000Z",
+          updated_at: "2026-03-20T00:00:00.000Z",
+        },
+      ],
+      policyAreaCommitteeEvidence: [],
+    })
+  );
+  t.after(() => mock.restoreAll());
+
+  const response = await app.fetch(
+    new Request(`${baseUrl}/api/maps/policy-committees?policyArea=Defense`),
+    makeEnv()
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    policy_area: "Armed Forces and National Security",
+    count: 1,
+    rows: [
+      {
+        id: 21,
+        policy_area: "Armed Forces and National Security",
+        committee_id: 1,
+        confidence: 0.7,
+        source: "bill_history",
+        evidence_count: 4,
+        bill_count: 4,
+        first_seen_congress: 119,
+        last_seen_congress: 119,
+        last_seen_at: "2026-03-20T00:00:00.000Z",
+        is_manual_override: false,
+        is_suppressed: false,
+        created_at: "2026-03-20T00:00:00.000Z",
+        updated_at: "2026-03-20T00:00:00.000Z",
+        committee: {
+          id: 1,
+          committee_key: "ARMED SERVICES:Unknown",
+          committee_code: null,
+          name: "Armed Services",
+          normalized_name: "ARMED SERVICES",
+          chamber: null,
+        },
+      },
+    ],
   });
 });
 
